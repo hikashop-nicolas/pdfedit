@@ -39,6 +39,7 @@ interface FontRec {
   italic: boolean;
   family: Family;
   baseName: string; // font name without the "ABCDEF+" subset prefix, for sibling lookup
+  isType3: boolean; // Type3 fonts draw glyphs procedurally; visible but no reusable program
   data?: Uint8Array; // original embedded font program (pdf.js, sanitized to OpenType)
   cssName?: string; // @font-face family name registered for the overlay
 }
@@ -460,13 +461,15 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     let italic = false;
     let family: Family = "sans";
     let baseName = "";
+    let isType3 = false;
     let data: Uint8Array | undefined;
     let cssName: string | undefined;
     try {
       if (page.commonObjs.has(fontName)) {
-        const f = page.commonObjs.get(fontName) as { name?: string; bold?: boolean; italic?: boolean; black?: boolean; data?: Uint8Array | ArrayBuffer };
+        const f = page.commonObjs.get(fontName) as { name?: string; type?: string; bold?: boolean; italic?: boolean; black?: boolean; data?: Uint8Array | ArrayBuffer };
         const nm = String(f?.name ?? "");
         baseName = nm.replace(/^[A-Z]{6}\+/, "");
+        isType3 = f?.type === "Type3";
         // Prefer pdf.js's own flags (from the font's OS/2 / descriptor), which work even
         // when a subset font name omits "Bold"/"Italic"; fall back to the name.
         bold = f?.bold === true || f?.black === true || /bold|black|semibold|heavy/i.test(nm);
@@ -483,7 +486,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     } catch {
       /* defaults */
     }
-    const rec: FontRec = { bold, italic, family, baseName, data, cssName };
+    const rec: FontRec = { bold, italic, family, baseName, isType3, data, cssName };
     fontRecs.set(fontName, rec);
     return rec;
   };
@@ -763,12 +766,27 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       pageEls.push({ el: pageEl, viewport, index: p - 1 });
 
       const content = await page.getTextContent();
-      const items: RunItem[] = [];
+      const allItems: RunItem[] = [];
       for (const item of content.items) {
         if (!("str" in item) || item.str === "") continue;
         const t = item.transform as number[];
-        items.push({ str: item.str, x: t[4]!, y: t[5]!, w: item.width ?? 0, size: Math.hypot(t[2]!, t[3]!) || 10, fontName: item.fontName });
+        allItems.push({ str: item.str, x: t[4]!, y: t[5]!, w: item.width ?? 0, size: Math.hypot(t[2]!, t[3]!) || 10, fontName: item.fontName });
       }
+      // Drop hidden text layers: some PDFs (e.g. Google Docs / OCR exports) draw the
+      // visible glyphs with an embedded/Type3 font and overlay an invisible copy in a
+      // plain standard font (Helvetica/Times, no embedded program) for selection. Editing
+      // would otherwise repaint that copy as visible and clobber the real font. A
+      // standard-font run that overlaps a real (embedded or Type3) run on the same line is
+      // treated as hidden; a standalone standard-font run is kept.
+      const boxes = allItems.map((it) => ({ it, rec: getFontRec(page, it.fontName) }));
+      const real = boxes.filter((b) => b.rec.data || b.rec.isType3);
+      const items = boxes
+        .filter((b) => {
+          if (b.rec.data || b.rec.isType3) return true;
+          const overlaps = real.some((r) => Math.abs(r.it.y - b.it.y) <= Math.max(b.it.size, r.it.size) * 0.5 && b.it.x < r.it.x + r.it.w && r.it.x < b.it.x + b.it.w);
+          return !overlaps;
+        })
+        .map((b) => b.it);
       const perItemColor = !!cctx && items.length <= 800;
 
       for (const lines of buildParagraphs(items)) {
