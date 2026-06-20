@@ -34,10 +34,12 @@ interface RGB {
   g: number;
   b: number;
 }
-interface FontStyle {
+interface FontRec {
   bold: boolean;
   italic: boolean;
   family: Family;
+  data?: Uint8Array; // original embedded font program (pdf.js, sanitized to OpenType)
+  cssName?: string; // @font-face family name registered for the overlay
 }
 interface RunItem {
   str: string;
@@ -93,6 +95,7 @@ interface StyledRun {
   color: RGB; // 0..1
   href?: string;
   brAfter?: boolean;
+  fontKey?: string; // original font identity, for embedded-font reuse on export
 }
 
 const ICON = {
@@ -284,28 +287,6 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 };
 
-function getFontStyle(page: pdfjsLib.PDFPageProxy, fontName: string, cache: Map<string, FontStyle>): FontStyle {
-  const hit = cache.get(fontName);
-  if (hit) return hit;
-  let bold = false;
-  let italic = false;
-  let family: Family = "sans";
-  try {
-    if (page.commonObjs.has(fontName)) {
-      const f = page.commonObjs.get(fontName) as { name?: string; black?: boolean };
-      const nm = String(f?.name ?? "");
-      bold = /bold|black|semibold|heavy/i.test(nm) || f?.black === true;
-      italic = /italic|oblique/i.test(nm);
-      family = familyOf(nm);
-    }
-  } catch {
-    /* defaults */
-  }
-  const fs: FontStyle = { bold, italic, family };
-  cache.set(fontName, fs);
-  return fs;
-}
-
 function buildLines(items: RunItem[]): Line[] {
   const sorted = items.slice().sort((a, b) => b.y - a.y || a.x - b.x);
   const lines: Line[] = [];
@@ -382,7 +363,7 @@ function detectAlign(lines: Line[], boxX: number, boxRight: number, pageW: numbe
 }
 
 /** Parse a paragraph block's rich HTML into styled runs (sizes in pt). */
-function parseRuns(el: HTMLElement, base: { bold: boolean; italic: boolean; family: Family; size: number; color: RGB }, scale: number): StyledRun[] {
+function parseRuns(el: HTMLElement, base: { bold: boolean; italic: boolean; family: Family; size: number; color: RGB; fontKey?: string }, scale: number): StyledRun[] {
   const runs: StyledRun[] = [];
   const walk = (node: Node, st: typeof base & { href?: string }): void => {
     for (const child of Array.from(node.childNodes)) {
@@ -396,6 +377,7 @@ function parseRuns(el: HTMLElement, base: { bold: boolean; italic: boolean; fami
       } else if (child instanceof HTMLElement) {
         const next = { ...st };
         const tag = child.tagName;
+        if (child.dataset.font) next.fontKey = child.dataset.font;
         if (tag === "B" || tag === "STRONG") next.bold = true;
         if (tag === "I" || tag === "EM") next.italic = true;
         if (tag === "A") next.href = (child as HTMLAnchorElement).getAttribute("href") ?? st.href;
@@ -427,6 +409,8 @@ interface Tok {
   space: boolean;
 }
 
+let instanceSeq = 0;
+
 export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, options: PdfEditorOptions = {}): PdfEditor {
   if (options.workerSrc) pdfjsLib.GlobalWorkerOptions.workerSrc = options.workerSrc;
   const scale = options.scale ?? 1.3;
@@ -445,6 +429,60 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       activePara.el.classList.add("pdfedit-edited");
     }
     change();
+  };
+
+  // Per-instance font registry: bold/italic/family plus the original embedded font
+  // program (reused on export) and an @font-face name (so the overlay shows the real
+  // font while editing). Keyed by pdf.js loadedName (unique per font in the document).
+  const uid = (instanceSeq++).toString(36);
+  const fontRecs = new Map<string, FontRec>();
+  const faces = new Map<string, FontFace>();
+  const registerFace = (key: string, data: Uint8Array): string | undefined => {
+    const name = `pf_${uid}_${key.replace(/[^a-zA-Z0-9_]/g, "")}`;
+    if (faces.has(name)) return name;
+    try {
+      const ff = new FontFace(name, data.slice() as unknown as ArrayBuffer);
+      faces.set(name, ff);
+      document.fonts.add(ff);
+      ff.load().catch(() => {
+        /* font format the browser can't load; the overlay falls back to the CSS family */
+      });
+      return name;
+    } catch {
+      return undefined;
+    }
+  };
+  const getFontRec = (page: pdfjsLib.PDFPageProxy, fontName: string): FontRec => {
+    const hit = fontRecs.get(fontName);
+    if (hit) return hit;
+    let bold = false;
+    let italic = false;
+    let family: Family = "sans";
+    let data: Uint8Array | undefined;
+    let cssName: string | undefined;
+    try {
+      if (page.commonObjs.has(fontName)) {
+        const f = page.commonObjs.get(fontName) as { name?: string; bold?: boolean; italic?: boolean; black?: boolean; data?: Uint8Array | ArrayBuffer };
+        const nm = String(f?.name ?? "");
+        // Prefer pdf.js's own flags (from the font's OS/2 / descriptor), which work even
+        // when a subset font name omits "Bold"/"Italic"; fall back to the name.
+        bold = f?.bold === true || f?.black === true || /bold|black|semibold|heavy/i.test(nm);
+        italic = f?.italic === true || /italic|oblique/i.test(nm);
+        family = familyOf(nm);
+        if (f?.data) {
+          const d = f.data instanceof Uint8Array ? f.data : new Uint8Array(f.data);
+          if (d.length) {
+            data = d;
+            cssName = registerFace(fontName, d);
+          }
+        }
+      }
+    } catch {
+      /* defaults */
+    }
+    const rec: FontRec = { bold, italic, family, data, cssName };
+    fontRecs.set(fontName, rec);
+    return rec;
   };
 
   injectStyles();
@@ -684,7 +722,6 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
 
   void (async () => {
     const doc = await pdfjsLib.getDocument({ data: bytes.slice(), fontExtraProperties: true }).promise;
-    const fontCache = new Map<string, FontStyle>();
     for (let p = 1; p <= doc.numPages && !destroyed; p++) {
       const page = await doc.getPage(p);
       const viewport = page.getViewport({ scale });
@@ -720,7 +757,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const topY = first.y + size * 0.85;
         const bottomY = lines[lines.length - 1]!.y - size * 0.3;
         const align = detectAlign(lines, boxX, boxRight, pageW);
-        const firstFs = getFontStyle(page, first.items[0]!.fontName, fontCache);
+        const firstRec = getFontRec(page, first.items[0]!.fontName);
+        const famCss = (rec: FontRec) => (rec.cssName ? `'${rec.cssName}', ${cssFamily(rec.family)}` : cssFamily(rec.family));
 
         const tl = viewport.convertToViewportPoint(boxX, topY);
         const br = viewport.convertToViewportPoint(boxRight, bottomY);
@@ -737,32 +775,37 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const fgHex = rgb255ToHex(fg);
         let html = "";
         let curKey = "";
-        let curFs: FontStyle = firstFs;
+        let curRec: FontRec = firstRec;
+        let curFontName = first.items[0]!.fontName;
         let curSize = size;
         let curColor = fgHex;
         let curText = "";
         const flushSpan = () => {
           if (!curText) return;
           const parts: string[] = [];
-          if (curFs.bold) parts.push("font-weight:bold");
-          if (curFs.italic) parts.push("font-style:italic");
-          parts.push(`font-family:${cssFamily(curFs.family)}`);
+          if (curRec.bold) parts.push("font-weight:bold");
+          if (curRec.italic) parts.push("font-style:italic");
+          parts.push(`font-family:${famCss(curRec)}`);
           parts.push(`font-size:${(curSize * scale).toFixed(2)}px`);
           parts.push(`color:${curColor}`);
-          html += `<span style="${parts.join(";")}">${escapeHtml(curText)}</span>`;
+          html += `<span data-font="${curFontName}" style="${parts.join(";")}">${escapeHtml(curText)}</span>`;
           curText = "";
         };
         const lastLi = lines.length - 1;
         lines.forEach((ln, li) => {
           for (const it of ln.items) {
             if (it.str === "") continue;
-            const fs = getFontStyle(page, it.fontName, fontCache);
+            const rec = getFontRec(page, it.fontName);
             const szR = Math.round(it.size * 10) / 10;
-            const key = `${fs.bold}|${fs.italic}|${fs.family}|${szR}`;
+            // Key by font identity (not just detected style) so a differently-fonted run,
+            // e.g. a bold subset whose name omits "Bold", still gets its own span and its
+            // own original font on export.
+            const key = `${it.fontName}|${szR}`;
             if (key !== curKey) {
               flushSpan();
               curKey = key;
-              curFs = fs;
+              curRec = rec;
+              curFontName = it.fontName;
               curSize = it.size;
               curColor = perItemColor ? rgb255ToHex(sampleRunFg(cctx!, viewport, it.x, it.y, it.w, it.size)) : fgHex;
             }
@@ -785,7 +828,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         el.style.lineHeight = `${lineHeight * scale}px`;
         el.style.fontWeight = "normal";
         el.style.fontStyle = "normal";
-        el.style.fontFamily = cssFamily(firstFs.family);
+        el.style.fontFamily = famCss(firstRec);
         el.style.textAlign = align;
         el.style.color = fgHex;
         el.style.setProperty("--c", fgHex);
@@ -801,7 +844,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           lineHeight,
           size,
           align,
-          family: firstFs.family,
+          family: firstRec.family,
           color: norm(fg),
           bg: norm(bg),
           origText,
@@ -845,13 +888,63 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         }
         return f;
       };
+      // Re-embed the original font program once per source font.
+      const embedCache = new Map<string, PDFFont | null>();
+      const getEmbedded = async (key: string): Promise<PDFFont | null> => {
+        if (embedCache.has(key)) return embedCache.get(key)!;
+        const rec = fontRecs.get(key);
+        let font: PDFFont | null = null;
+        if (rec?.data && rec.data.length) {
+          // Subset to keep the output small; some fonts can't be subset, so fall back to
+          // embedding the whole (already-subset) program.
+          try {
+            font = await pdf.embedFont(rec.data, { subset: true });
+          } catch {
+            try {
+              font = await pdf.embedFont(rec.data, { subset: false });
+            } catch {
+              font = null;
+            }
+          }
+        }
+        embedCache.set(key, font);
+        return font;
+      };
+      // Whether an embedded font can render every (non-space) char in the text.
+      const covers = (font: PDFFont, text: string): boolean => {
+        try {
+          const fk = (font as unknown as { embedder?: { font?: { hasGlyphForCodePoint?: (cp: number) => boolean } } }).embedder?.font;
+          if (!fk?.hasGlyphForCodePoint) return false;
+          for (const ch of text) {
+            const cp = ch.codePointAt(0);
+            if (!cp || cp === 32 || cp === 9 || cp === 10 || cp === 13) continue;
+            if (!fk.hasGlyphForCodePoint(cp)) return false;
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      // Resolve a font per token: reuse the original embedded font when the run's style
+      // is unchanged from the source and the font can render that word; otherwise a
+      // standard font (WinAnsi). Per-word (not per-run) so one novel character only
+      // affects its own word, not the whole paragraph.
+      const resolveToken = async (run: StyledRun, part: string, space: boolean): Promise<{ font: PDFFont; text: string }> => {
+        const rec = run.fontKey ? fontRecs.get(run.fontKey) : undefined;
+        const styleSame = !!(rec && run.bold === rec.bold && run.italic === rec.italic);
+        const std = await getStd(standardFont(rec ? rec.family : run.family, rec ? rec.bold : run.bold, rec ? rec.italic : run.italic));
+        const emb = run.fontKey && styleSame ? await getEmbedded(run.fontKey) : null;
+        if (space) return { font: emb ?? std, text: " " };
+        if (emb && covers(emb, part)) return { font: emb, text: part };
+        return { font: std, text: sanitizeStd(part) };
+      };
 
       for (const pp of editedParas) {
         const page = pages[pp.page];
         if (!page) continue;
         page.drawRectangle({ x: pp.x, y: pp.bottomY, width: Math.max(pp.w, 1), height: Math.max(pp.topY - pp.bottomY, 1), color: rgb(pp.bg.r, pp.bg.g, pp.bg.b) });
         const runs = parseRuns(pp.el, { bold: false, italic: false, family: pp.family, size: pp.size, color: pp.color }, scale);
-        await drawRuns(pdf, page, pp, runs, getStd);
+        await drawRuns(pdf, page, pp, runs, resolveToken);
       }
 
       for (const im of images) {
@@ -869,6 +962,13 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     destroy() {
       destroyed = true;
       document.removeEventListener("selectionchange", onSelChange);
+      for (const ff of faces.values()) {
+        try {
+          document.fonts.delete(ff);
+        } catch {
+          /* ignore */
+        }
+      }
       wrap.remove();
     },
   };
@@ -878,24 +978,24 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     page: PDFPage,
     pp: Paragraph,
     runs: StyledRun[],
-    getStd: (k: StandardFonts) => Promise<PDFFont>,
+    resolveToken: (run: StyledRun, part: string, space: boolean) => Promise<{ font: PDFFont; text: string }>,
   ): Promise<void> {
     // Tokenize runs into words/spaces, resolving a font per token.
     const toks: Tok[] = [];
     const lineBreaks: number[] = [];
     for (const run of runs) {
-      const font = await getStd(standardFont(run.family, run.bold, run.italic));
-      const parts = sanitizeStd(run.text).split(/(\s+)/);
+      const parts = run.text.split(/(\s+)/);
       for (const part of parts) {
         if (part === "") continue;
         const space = /^\s+$/.test(part);
+        const { font, text } = await resolveToken(run, part, space);
         let w = 0;
         try {
-          w = font.widthOfTextAtSize(part, run.size);
+          w = font.widthOfTextAtSize(text, run.size);
         } catch {
-          w = run.size * part.length * 0.5;
+          w = run.size * text.length * 0.5;
         }
-        toks.push({ text: space ? " " : part, run, font, w: space ? font.widthOfTextAtSize(" ", run.size) : w, space });
+        toks.push({ text, run, font, w, space });
       }
       if (run.brAfter) lineBreaks.push(toks.length);
     }
