@@ -42,6 +42,9 @@ interface FontRec {
   isType3: boolean; // Type3 fonts draw glyphs procedurally; visible but no reusable program
   data?: Uint8Array; // original embedded font program (pdf.js, sanitized to OpenType)
   cssName?: string; // @font-face family name registered for the overlay
+  synthBold?: boolean; // renders heavier than a same-name sibling; emulate bold on export
+  inkSum?: number; // accumulated glyph ink coverage (for bold-by-density detection)
+  inkN?: number;
 }
 interface RunItem {
   str: string;
@@ -196,7 +199,7 @@ function cssColorToRgb(str: string, fallback: RGB): RGB {
   return { r: Number(m[1]) / 255, g: Number(m[2]) / 255, b: Number(m[3]) / 255 };
 }
 
-function sampleColors(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): { fg: RGB; bg: RGB } {
+function sampleColors(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): { fg: RGB; bg: RGB; ink: number } {
   const cw = ctx.canvas.width;
   const ch = ctx.canvas.height;
   const sx = Math.max(0, Math.min(Math.floor(x), cw - 1));
@@ -207,7 +210,7 @@ function sampleColors(ctx: CanvasRenderingContext2D, x: number, y: number, w: nu
   try {
     data = ctx.getImageData(sx, sy, sw, sh).data;
   } catch {
-    return { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 } };
+    return { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 }, ink: 0 };
   }
   // Background = most common color in the region (robust vs. a corner pixel landing
   // on a glyph). Foreground = the pixel furthest from the background.
@@ -236,29 +239,32 @@ function sampleColors(ctx: CanvasRenderingContext2D, x: number, y: number, w: nu
   }
   let fg = bg;
   let best = -1;
+  let ink = 0; // opaque pixels far enough from bg to be glyph coverage
   for (let i = 0; i < data.length; i += 4) {
     if ((data[i + 3] ?? 0) < 128) continue;
     const dr = data[i]! - bg.r;
     const dg = data[i + 1]! - bg.g;
     const db = data[i + 2]! - bg.b;
     const d = dr * dr + dg * dg + db * db;
+    if (d > 8000) ink++;
     if (d > best) {
       best = d;
       fg = { r: data[i]!, g: data[i + 1]!, b: data[i + 2]! };
     }
   }
-  return { fg, bg };
+  return { fg, bg, ink: data.length ? ink / (data.length / 4) : 0 };
 }
 
-/** Foreground (glyph) color of a single run's box, sampled from the rendered canvas. */
-function sampleRunFg(ctx: CanvasRenderingContext2D, viewport: pdfjsLib.PageViewport, x: number, baseY: number, w: number, size: number): RGB {
+/** Glyph color and ink coverage of a single run's box, sampled from the rendered canvas. */
+function sampleRunStats(ctx: CanvasRenderingContext2D, viewport: pdfjsLib.PageViewport, x: number, baseY: number, w: number, size: number): { fg: RGB; ink: number } {
   const tl = viewport.convertToViewportPoint(x, baseY + size * 0.85);
   const br = viewport.convertToViewportPoint(x + w, baseY - size * 0.2);
   const left = Math.min(tl[0]!, br[0]!);
   const top = Math.min(tl[1]!, br[1]!);
   const dW = Math.abs(br[0]! - tl[0]!);
   const dH = Math.abs(br[1]! - tl[1]!);
-  return sampleColors(ctx, left, top, Math.max(dW, 2), Math.max(dH, 2)).fg;
+  const s = sampleColors(ctx, left, top, Math.max(dW, 2), Math.max(dH, 2));
+  return { fg: s.fg, ink: s.ink };
 }
 
 // Replace characters the standard fonts can't encode so drawText never throws (which
@@ -409,6 +415,7 @@ interface Tok {
   font: PDFFont;
   w: number;
   space: boolean;
+  faux: boolean; // emulate bold by double-striking (no real bold font available)
 }
 
 let instanceSeq = 0;
@@ -497,17 +504,41 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     for (const [k, r] of fontRecs) if (r.baseName === baseName && has(r)) return [k, r];
     return undefined;
   };
-  // After load, let overlay spans whose font has no @font-face borrow a sibling's, so the
-  // real document font shows while editing (e.g. a Type3 font borrowing its CID twin).
+  // Detect "rendered-bolder" fonts: a font whose glyph ink coverage is notably higher
+  // than a same-base-name sibling is an emphasized/bold variant even when its name and
+  // flags say regular (e.g. a Type3 heading vs the CID body, same "CenturyStd-Book").
+  const detectSynthBold = () => {
+    const dens = new Map<string, number>();
+    for (const [k, rec] of fontRecs) if (rec.inkN) dens.set(k, rec.inkSum! / rec.inkN);
+    const baseMin = new Map<string, number>();
+    for (const [k, rec] of fontRecs) {
+      const d = dens.get(k);
+      if (d == null) continue;
+      const b = rec.baseName || k;
+      if (!baseMin.has(b) || d < baseMin.get(b)!) baseMin.set(b, d);
+    }
+    for (const [k, rec] of fontRecs) {
+      const d = dens.get(k);
+      if (d == null || rec.bold) continue;
+      const min = baseMin.get(rec.baseName || k);
+      if (min != null && min > 0 && d > min * 1.18) rec.synthBold = true;
+    }
+  };
+  // After load: spans whose font has no @font-face borrow a sibling's (so the real font
+  // shows while editing, e.g. a Type3 font borrowing its CID twin), and synthBold spans
+  // get a bold weight so the emphasis is visible and preserved on export.
   const upgradeOverlayFonts = () => {
+    detectSynthBold();
     for (const para of paragraphs) {
       para.el.querySelectorAll<HTMLElement>("span[data-font]").forEach((span) => {
         const key = span.dataset.font;
         const rec = key ? fontRecs.get(key) : undefined;
-        if (rec && !rec.cssName && rec.baseName) {
+        if (!rec) return;
+        if (!rec.cssName && rec.baseName) {
           const donor = findDonor(rec.baseName, (r) => !!r.cssName);
           if (donor) span.style.fontFamily = `'${donor[1].cssName}', ${span.style.fontFamily}`;
         }
+        if (rec.synthBold) span.style.fontWeight = "bold";
       });
     }
   };
@@ -849,7 +880,12 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
               curRec = rec;
               curFontName = it.fontName;
               curSize = it.size;
-              curColor = perItemColor ? rgb255ToHex(sampleRunFg(cctx!, viewport, it.x, it.y, it.w, it.size)) : fgHex;
+              if (cctx && it.str.trim() !== "") {
+                const st = sampleRunStats(cctx, viewport, it.x, it.y, it.w, it.size);
+                if (perItemColor) curColor = rgb255ToHex(st.fg);
+                rec.inkSum = (rec.inkSum ?? 0) + st.ink;
+                rec.inkN = (rec.inkN ?? 0) + 1;
+              } else curColor = fgHex;
             }
             curText += it.str;
           }
@@ -972,10 +1008,13 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       // is unchanged from the source and the font can render that word; otherwise a
       // standard font (WinAnsi). Per-word (not per-run) so one novel character only
       // affects its own word, not the whole paragraph.
-      const resolveToken = async (run: StyledRun, part: string, space: boolean): Promise<{ font: PDFFont; text: string }> => {
+      const resolveToken = async (run: StyledRun, part: string, space: boolean): Promise<{ font: PDFFont; text: string; faux: boolean }> => {
         const rec = run.fontKey ? fontRecs.get(run.fontKey) : undefined;
-        const styleSame = !!(rec && run.bold === rec.bold && run.italic === rec.italic);
-        const std = await getStd(standardFont(rec ? rec.family : run.family, rec ? rec.bold : run.bold, rec ? rec.italic : run.italic));
+        // "Effective" original weight includes synthBold (a font that renders heavier than
+        // its sibling). Matching it means the user didn't toggle, so reuse the real font.
+        const effBold = rec ? rec.bold || !!rec.synthBold : run.bold;
+        const styleSame = !!(rec && run.bold === effBold && run.italic === rec.italic);
+        const std = await getStd(standardFont(rec ? rec.family : run.family, run.bold, run.italic));
         // Pick the embed source: the run's own font if it has a program, else a sibling
         // with the same base name that does (e.g. a Type3 font borrowing its CID twin).
         let embKey: string | undefined;
@@ -987,9 +1026,13 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           }
         }
         const emb = embKey ? await getEmbedded(embKey) : null;
-        if (space) return { font: emb ?? std, text: " " };
-        if (emb && covers(emb, part)) return { font: emb, text: part };
-        return { font: std, text: sanitizeStd(part) };
+        if (space) return { font: emb ?? std, text: " ", faux: false };
+        if (emb && covers(emb, part)) {
+          // Faux-bold when the run is bold but the reused font isn't an actual bold font.
+          const embBold = !!(embKey && fontRecs.get(embKey)?.bold);
+          return { font: emb, text: part, faux: run.bold && !embBold };
+        }
+        return { font: std, text: sanitizeStd(part), faux: false };
       };
 
       for (const pp of editedParas) {
@@ -1031,7 +1074,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     page: PDFPage,
     pp: Paragraph,
     runs: StyledRun[],
-    resolveToken: (run: StyledRun, part: string, space: boolean) => Promise<{ font: PDFFont; text: string }>,
+    resolveToken: (run: StyledRun, part: string, space: boolean) => Promise<{ font: PDFFont; text: string; faux: boolean }>,
   ): Promise<void> {
     // Tokenize runs into words/spaces, resolving a font per token.
     const toks: Tok[] = [];
@@ -1041,14 +1084,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       for (const part of parts) {
         if (part === "") continue;
         const space = /^\s+$/.test(part);
-        const { font, text } = await resolveToken(run, part, space);
+        const { font, text, faux } = await resolveToken(run, part, space);
         let w = 0;
         try {
           w = font.widthOfTextAtSize(text, run.size);
         } catch {
           w = run.size * text.length * 0.5;
         }
-        toks.push({ text, run, font, w, space });
+        toks.push({ text, run, font, w, space, faux });
       }
       if (run.brAfter) lineBreaks.push(toks.length);
     }
@@ -1088,7 +1131,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       for (const t of line) {
         if (!t.space) {
           try {
-            page.drawText(t.text, { x, y, size: t.run.size, font: t.font, color: rgb(t.run.color.r, t.run.color.g, t.run.color.b) });
+            const col = rgb(t.run.color.r, t.run.color.g, t.run.color.b);
+            page.drawText(t.text, { x, y, size: t.run.size, font: t.font, color: col });
+            // Faux bold: redraw with a small horizontal offset to thicken the strokes.
+            if (t.faux) page.drawText(t.text, { x: x + Math.max(t.run.size * 0.03, 0.2), y, size: t.run.size, font: t.font, color: col });
           } catch {
             /* glyph not encodable */
           }
