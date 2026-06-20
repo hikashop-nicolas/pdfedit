@@ -73,6 +73,7 @@ interface Paragraph {
   size: number;
   align: Align;
   family: Family;
+  baseFontKey: string; // dominant font of the paragraph, for stray/newly-typed text
   color: RGB; // 0..1
   bg: RGB; // 0..1
   origText: string;
@@ -527,9 +528,18 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   // After load: spans whose font has no @font-face borrow a sibling's (so the real font
   // shows while editing, e.g. a Type3 font borrowing its CID twin), and synthBold spans
   // get a bold weight so the emphasis is visible and preserved on export.
+  const faceFor = (rec: FontRec): string | undefined => {
+    if (rec.cssName) return rec.cssName;
+    const donor = rec.baseName ? findDonor(rec.baseName, (r) => !!r.cssName) : undefined;
+    return donor?.[1].cssName;
+  };
   const upgradeOverlayFonts = () => {
     detectSynthBold();
     for (const para of paragraphs) {
+      // Block element (covers stray / newly-typed text) gets the dominant font's face.
+      const baseRec = fontRecs.get(para.baseFontKey);
+      const baseFace = baseRec ? faceFor(baseRec) : undefined;
+      if (baseFace) para.el.style.fontFamily = `'${baseFace}', ${para.el.style.fontFamily}`;
       para.el.querySelectorAll<HTMLElement>("span[data-font]").forEach((span) => {
         const key = span.dataset.font;
         const rec = key ? fontRecs.get(key) : undefined;
@@ -853,6 +863,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         let curSize = size;
         let curColor = fgHex;
         let curText = "";
+        const fontCount = new Map<string, number>(); // chars per font, to find the dominant one
         const flushSpan = () => {
           if (!curText) return;
           const parts: string[] = [];
@@ -869,6 +880,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           for (const it of ln.items) {
             if (it.str === "") continue;
             const rec = getFontRec(page, it.fontName);
+            fontCount.set(it.fontName, (fontCount.get(it.fontName) ?? 0) + it.str.length);
             const szR = Math.round(it.size * 10) / 10;
             // Key by font identity (not just detected style) so a differently-fonted run,
             // e.g. a bold subset whose name omits "Bold", still gets its own span and its
@@ -893,6 +905,18 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         });
         flushSpan();
 
+        // Dominant font (most characters): used for the block element and as the fallback
+        // for stray / newly-typed text, so it matches the document instead of a generic.
+        let baseFontName = first.items[0]!.fontName;
+        let bestN = -1;
+        for (const [fn, n] of fontCount) {
+          if (n > bestN) {
+            bestN = n;
+            baseFontName = fn;
+          }
+        }
+        const baseRec = getFontRec(page, baseFontName);
+
         const el = document.createElement("div");
         el.className = "pdfedit-para";
         el.contentEditable = "true";
@@ -906,7 +930,9 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         el.style.lineHeight = `${lineHeight * scale}px`;
         el.style.fontWeight = "normal";
         el.style.fontStyle = "normal";
-        el.style.fontFamily = famCss(firstRec);
+        // Generic family here; the dominant font's @font-face is added post-load (its face,
+        // or a sibling donor's, may not be registered yet at this point).
+        el.style.fontFamily = cssFamily(baseRec.family);
         el.style.textAlign = align;
         el.style.color = fgHex;
         el.style.setProperty("--c", fgHex);
@@ -922,7 +948,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           lineHeight,
           size,
           align,
-          family: firstRec.family,
+          family: baseRec.family,
+          baseFontKey: baseFontName,
           color: norm(fg),
           bg: norm(bg),
           origText,
@@ -1039,7 +1066,18 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const page = pages[pp.page];
         if (!page) continue;
         page.drawRectangle({ x: pp.x, y: pp.bottomY, width: Math.max(pp.w, 1), height: Math.max(pp.topY - pp.bottomY, 1), color: rgb(pp.bg.r, pp.bg.g, pp.bg.b) });
-        const runs = parseRuns(pp.el, { bold: false, italic: false, family: pp.family, size: pp.size, color: pp.color }, scale);
+        // Fallback for text typed directly in the block (outside any span): the paragraph's
+        // dominant font, so stray text exports in the document font, not a generic one.
+        const baseRec = fontRecs.get(pp.baseFontKey);
+        const base = {
+          bold: baseRec ? baseRec.bold || !!baseRec.synthBold : false,
+          italic: baseRec ? baseRec.italic : false,
+          family: pp.family,
+          size: pp.size,
+          color: pp.color,
+          fontKey: baseRec ? pp.baseFontKey : undefined,
+        };
+        const runs = parseRuns(pp.el, base, scale);
         await drawRuns(pdf, page, pp, runs, resolveToken);
       }
 
