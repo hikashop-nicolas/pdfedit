@@ -9,7 +9,6 @@ export interface PdfEditorOptions {
 export interface PdfEditor {
     /** Export the edited PDF as bytes (original bytes if nothing changed). */
     getBytes(): Promise<Uint8Array>;
-    /** Whether anything has been edited. */
     isDirty(): boolean;
     destroy(): void;
 }

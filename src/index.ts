@@ -1,17 +1,19 @@
 import * as pdfjsLib from "pdfjs-dist";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
+import { PDFDocument, type PDFFont, StandardFonts, rgb } from "pdf-lib";
 
 // pdfedit: a standalone, framework-agnostic PDF text editor.
 //
-// It renders each page with pdf.js (raster) and overlays an editable text layer
-// extracted from getTextContent. Unedited tokens are invisible (the rendered page
-// shows through); editing a token covers the original and draws the new text. On
-// export, pdf-lib loads the original PDF, whites out each edited token's box, and
-// redraws the new text with an embedded font, returning new bytes.
+// Renders each page with pdf.js (raster) and overlays an editable text layer extracted
+// from getTextContent. Unedited runs are invisible (the rendered page shows through);
+// editing a run covers the original and shows the new text in its detected style. On
+// export, pdf-lib loads the original PDF, paints over each edited run with its detected
+// background, and redraws the new text preserving size, color, weight/style, and (where
+// possible) the original embedded font.
 //
-// Honest limitations: edited/new text uses a standard font (not the original
-// typeface); scanned (image-only) PDFs have no text layer to edit; there is no
-// automatic paragraph reflow (you edit positioned text runs).
+// Styling preserved: size, color, bold/italic, font family, and the embedded font when
+// it can render the new characters (subset fonts fall back to the matching standard
+// font). Honest limits: no scanned-PDF OCR, no automatic paragraph reflow.
 
 export interface PdfEditorOptions {
   /** URL of the pdf.js worker (the consumer's bundler resolves this). */
@@ -25,11 +27,16 @@ export interface PdfEditorOptions {
 export interface PdfEditor {
   /** Export the edited PDF as bytes (original bytes if nothing changed). */
   getBytes(): Promise<Uint8Array>;
-  /** Whether anything has been edited. */
   isDirty(): boolean;
   destroy(): void;
 }
 
+type Family = "sans" | "serif" | "mono";
+interface RGB {
+  r: number;
+  g: number;
+  b: number;
+}
 interface TextToken {
   page: number; // 0-based
   orig: string;
@@ -37,6 +44,13 @@ interface TextToken {
   y: number;
   width: number; // pt
   size: number; // pt
+  bold: boolean;
+  italic: boolean;
+  family: Family;
+  color: RGB; // 0..1
+  bg: RGB; // 0..1
+  fontKey: string;
+  fontData?: Uint8Array;
   el: HTMLSpanElement;
 }
 
@@ -56,14 +70,92 @@ function injectStyles(): void {
     .pdfedit-page canvas { display: block; }
     .pdfedit-tok {
       position: absolute; white-space: pre; transform-origin: left top;
-      color: transparent; background: transparent; cursor: text; outline: none;
-      font-family: Helvetica, Arial, sans-serif;
+      color: transparent; cursor: text; outline: none;
     }
-    .pdfedit-tok:focus, .pdfedit-tok.pdfedit-edited { color: #000; background: #fff; }
+    .pdfedit-tok:focus, .pdfedit-tok.pdfedit-edited { color: var(--tok-color, #000); background: var(--tok-bg, #fff); }
     .pdfedit-tok:focus { box-shadow: 0 0 0 2px #4f46e5; }
   `;
   document.head.appendChild(s);
 }
+
+function familyOf(name: string): Family {
+  if (/times|georgia|serif|roman|minion|garamond/i.test(name)) return "serif";
+  if (/courier|mono|consol|menlo/i.test(name)) return "mono";
+  return "sans";
+}
+
+function cssFamily(f: Family): string {
+  return f === "serif" ? "Times New Roman, serif" : f === "mono" ? "monospace" : "Helvetica, Arial, sans-serif";
+}
+
+function standardFont(f: Family, bold: boolean, italic: boolean): StandardFonts {
+  if (f === "serif") {
+    return bold && italic
+      ? StandardFonts.TimesRomanBoldItalic
+      : bold
+        ? StandardFonts.TimesRomanBold
+        : italic
+          ? StandardFonts.TimesRomanItalic
+          : StandardFonts.TimesRoman;
+  }
+  if (f === "mono") {
+    return bold && italic
+      ? StandardFonts.CourierBoldOblique
+      : bold
+        ? StandardFonts.CourierBold
+        : italic
+          ? StandardFonts.CourierOblique
+          : StandardFonts.Courier;
+  }
+  return bold && italic
+    ? StandardFonts.HelveticaBoldOblique
+    : bold
+      ? StandardFonts.HelveticaBold
+      : italic
+        ? StandardFonts.HelveticaOblique
+        : StandardFonts.Helvetica;
+}
+
+/** Sample a token's foreground (glyph) and background colors from the rendered canvas. */
+function sampleColors(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): { fg: RGB; bg: RGB } {
+  const cw = ctx.canvas.width;
+  const ch = ctx.canvas.height;
+  const sx = Math.max(0, Math.min(Math.floor(x), cw - 1));
+  const sy = Math.max(0, Math.min(Math.floor(y), ch - 1));
+  const sw = Math.max(1, Math.min(Math.floor(w), cw - sx));
+  const sh = Math.max(1, Math.min(Math.floor(h), ch - sy));
+  const black: RGB = { r: 0, g: 0, b: 0 };
+  const white: RGB = { r: 255, g: 255, b: 255 };
+  let data: Uint8ClampedArray;
+  try {
+    data = ctx.getImageData(sx, sy, sw, sh).data;
+  } catch {
+    return { fg: black, bg: white };
+  }
+  const bg: RGB = { r: data[0] ?? 255, g: data[1] ?? 255, b: data[2] ?? 255 };
+  let fg = bg;
+  let best = -1;
+  for (let i = 0; i < data.length; i += 4) {
+    if ((data[i + 3] ?? 0) < 128) continue;
+    const dr = data[i]! - bg.r;
+    const dg = data[i + 1]! - bg.g;
+    const db = data[i + 2]! - bg.b;
+    const d = dr * dr + dg * dg + db * db;
+    if (d > best) {
+      best = d;
+      fg = { r: data[i]!, g: data[i + 1]!, b: data[i + 2]! };
+    }
+  }
+  return { fg, bg };
+}
+
+const norm = (c: RGB): RGB => ({ r: c.r / 255, g: c.g / 255, b: c.b / 255 });
 
 export function createPdfEditor(
   container: HTMLElement,
@@ -82,7 +174,7 @@ export function createPdfEditor(
   container.appendChild(root);
 
   void (async () => {
-    const doc = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+    const doc = await pdfjsLib.getDocument({ data: bytes.slice(), fontExtraProperties: true }).promise;
     for (let p = 1; p <= doc.numPages && !destroyed; p++) {
       const page = await doc.getPage(p);
       const viewport = page.getViewport({ scale });
@@ -102,18 +194,55 @@ export function createPdfEditor(
       const content = await page.getTextContent();
       for (const item of content.items) {
         if (!("str" in item) || item.str.trim() === "") continue;
-        const t = item.transform as number[]; // [a,b,c,d,e,f] in PDF user space
-        const dev = pdfjsLib.Util.transform(viewport.transform, t); // device space
+        const t = item.transform as number[];
+        const dev = pdfjsLib.Util.transform(viewport.transform, t);
         const fontPx = Math.hypot(dev[2]!, dev[3]!);
+        const left = dev[4]!;
+        const top = dev[5]! - fontPx;
+        const devW = Math.max((item.width ?? 0) * scale, fontPx);
+
+        // Font + style from the loaded font object.
+        let bold = false;
+        let italic = false;
+        let family: Family = "sans";
+        let fontData: Uint8Array | undefined;
+        try {
+          if (page.commonObjs.has(item.fontName)) {
+            const f = page.commonObjs.get(item.fontName) as {
+              name?: string;
+              black?: boolean;
+              data?: Uint8Array;
+            };
+            const nm = String(f?.name ?? "");
+            bold = /bold|black|semibold|heavy/i.test(nm) || f?.black === true;
+            italic = /italic|oblique/i.test(nm);
+            family = familyOf(nm);
+            if (f?.data instanceof Uint8Array) fontData = f.data;
+          }
+        } catch {
+          /* font not available; use defaults */
+        }
+
+        const { fg, bg } = cctx
+          ? sampleColors(cctx, left, top, devW, fontPx * 1.2)
+          : { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 } };
+        const color = norm(fg);
+        const bgN = norm(bg);
+
         const span = document.createElement("span");
         span.className = "pdfedit-tok";
         span.contentEditable = "true";
         span.spellcheck = false;
         span.textContent = item.str;
-        span.style.left = `${dev[4]}px`;
-        span.style.top = `${dev[5]! - fontPx}px`;
+        span.style.left = `${left}px`;
+        span.style.top = `${top}px`;
         span.style.fontSize = `${fontPx}px`;
         span.style.lineHeight = `${fontPx}px`;
+        span.style.fontWeight = bold ? "bold" : "normal";
+        span.style.fontStyle = italic ? "italic" : "normal";
+        span.style.fontFamily = cssFamily(family);
+        span.style.setProperty("--tok-color", `rgb(${fg.r},${fg.g},${fg.b})`);
+        span.style.setProperty("--tok-bg", `rgb(${bg.r},${bg.g},${bg.b})`);
 
         const token: TextToken = {
           page: p - 1,
@@ -122,11 +251,17 @@ export function createPdfEditor(
           y: t[5]!,
           width: item.width ?? 0,
           size: Math.hypot(t[2]!, t[3]!) || fontPx / scale,
+          bold,
+          italic,
+          family,
+          color,
+          bg: bgN,
+          fontKey: item.fontName,
+          ...(fontData ? { fontData } : {}),
           el: span,
         };
         span.addEventListener("input", () => {
-          const changed = (span.textContent ?? "") !== token.orig;
-          span.classList.toggle("pdfedit-edited", changed);
+          span.classList.toggle("pdfedit-edited", (span.textContent ?? "") !== token.orig);
           options.onChange?.();
         });
         pageEl.appendChild(span);
@@ -144,8 +279,32 @@ export function createPdfEditor(
       const edited = tokens.filter((t) => (t.el.textContent ?? "") !== t.orig);
       if (edited.length === 0) return original.slice();
       const pdf = await PDFDocument.load(original.slice());
-      const font = await pdf.embedFont(StandardFonts.Helvetica);
+      pdf.registerFontkit(fontkit);
       const pages = pdf.getPages();
+      const stdCache = new Map<string, PDFFont>();
+      const embCache = new Map<string, PDFFont | null>();
+
+      const getStd = async (key: StandardFonts): Promise<PDFFont> => {
+        let f = stdCache.get(key);
+        if (!f) {
+          f = await pdf.embedFont(key);
+          stdCache.set(key, f);
+        }
+        return f;
+      };
+      const getEmbedded = async (t: TextToken): Promise<PDFFont | null> => {
+        if (!t.fontData) return null;
+        if (embCache.has(t.fontKey)) return embCache.get(t.fontKey) ?? null;
+        let f: PDFFont | null = null;
+        try {
+          f = await pdf.embedFont(t.fontData);
+        } catch {
+          f = null;
+        }
+        embCache.set(t.fontKey, f);
+        return f;
+      };
+
       for (const t of edited) {
         const page = pages[t.page];
         if (!page) continue;
@@ -154,10 +313,24 @@ export function createPdfEditor(
           y: t.y - t.size * 0.25,
           width: Math.max(t.width, 1),
           height: t.size * 1.25,
-          color: rgb(1, 1, 1),
+          color: rgb(t.bg.r, t.bg.g, t.bg.b),
         });
         const text = t.el.textContent ?? "";
-        if (text) page.drawText(text, { x: t.x, y: t.y, size: t.size, font, color: rgb(0, 0, 0) });
+        if (!text) continue;
+        const opts = { x: t.x, y: t.y, size: t.size, color: rgb(t.color.r, t.color.g, t.color.b) };
+        const embedded = await getEmbedded(t);
+        let drawn = false;
+        if (embedded) {
+          try {
+            page.drawText(text, { ...opts, font: embedded });
+            drawn = true;
+          } catch {
+            drawn = false; // subset font can't render the new characters
+          }
+        }
+        if (!drawn) {
+          page.drawText(text, { ...opts, font: await getStd(standardFont(t.family, t.bold, t.italic)) });
+        }
       }
       return new Uint8Array(await pdf.save());
     },
