@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pdfedit demo</title>
+    <style>
+      html, body { height: 100%; margin: 0; font: 14px system-ui, sans-serif; }
+      #app { display: flex; flex-direction: column; height: 100%; }
+      #bar { display: flex; gap: 10px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #ccc; }
+      #editor { flex: 1; min-height: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="bar">
+        <strong>pdfedit</strong>
+        <input id="file" type="file" accept="application/pdf" />
+        <button id="save" disabled>Download edited PDF</button>
+        <span id="status"></span>
+      </div>
+      <div id="editor"></div>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
