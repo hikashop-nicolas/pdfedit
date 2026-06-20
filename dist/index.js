@@ -56,7 +56,7 @@ const familyOf = (n) => /courier|mono|consol|menlo/i.test(n)
     ? "mono"
     : /sans|arial|helvetica|verdana|tahoma|segoe|calibri|roboto|system-ui|-apple-system/i.test(n)
         ? "sans"
-        : /times|georgia|serif|roman|minion|garamond|cambria/i.test(n)
+        : /times|georgia|serif|roman|minion|garamond|cambria|century|palatino|bookman|schoolbook|baskerville|caslon|didot|book antiqua/i.test(n)
             ? "serif"
             : "sans";
 const cssFamily = (f) => f === "serif" ? "Times New Roman, serif" : f === "mono" ? "monospace" : "Helvetica, Arial, sans-serif";
@@ -377,12 +377,14 @@ export function createPdfEditor(container, bytes, options = {}) {
         let bold = false;
         let italic = false;
         let family = "sans";
+        let baseName = "";
         let data;
         let cssName;
         try {
             if (page.commonObjs.has(fontName)) {
                 const f = page.commonObjs.get(fontName);
                 const nm = String(f?.name ?? "");
+                baseName = nm.replace(/^[A-Z]{6}\+/, "");
                 // Prefer pdf.js's own flags (from the font's OS/2 / descriptor), which work even
                 // when a subset font name omits "Bold"/"Italic"; fall back to the name.
                 bold = f?.bold === true || f?.black === true || /bold|black|semibold|heavy/i.test(nm);
@@ -400,9 +402,34 @@ export function createPdfEditor(container, bytes, options = {}) {
         catch {
             /* defaults */
         }
-        const rec = { bold, italic, family, data, cssName };
+        const rec = { bold, italic, family, baseName, data, cssName };
         fontRecs.set(fontName, rec);
         return rec;
+    };
+    // A font with no reusable program (e.g. a Type3 font) can borrow a sibling with the
+    // same base name that does have one. Returns [loadedName, rec] of the donor.
+    const findDonor = (baseName, has) => {
+        if (!baseName)
+            return undefined;
+        for (const [k, r] of fontRecs)
+            if (r.baseName === baseName && has(r))
+                return [k, r];
+        return undefined;
+    };
+    // After load, let overlay spans whose font has no @font-face borrow a sibling's, so the
+    // real document font shows while editing (e.g. a Type3 font borrowing its CID twin).
+    const upgradeOverlayFonts = () => {
+        for (const para of paragraphs) {
+            para.el.querySelectorAll("span[data-font]").forEach((span) => {
+                const key = span.dataset.font;
+                const rec = key ? fontRecs.get(key) : undefined;
+                if (rec && !rec.cssName && rec.baseName) {
+                    const donor = findDonor(rec.baseName, (r) => !!r.cssName);
+                    if (donor)
+                        span.style.fontFamily = `'${donor[1].cssName}', ${span.style.fontFamily}`;
+                }
+            });
+        }
     };
     injectStyles();
     const wrap = document.createElement("div");
@@ -778,6 +805,7 @@ export function createPdfEditor(container, bytes, options = {}) {
             }
             root.appendChild(pageEl);
         }
+        upgradeOverlayFonts();
     })().catch((e) => console.error("[pdfedit] render failed", e));
     return {
         isDirty() {
@@ -851,7 +879,19 @@ export function createPdfEditor(container, bytes, options = {}) {
                 const rec = run.fontKey ? fontRecs.get(run.fontKey) : undefined;
                 const styleSame = !!(rec && run.bold === rec.bold && run.italic === rec.italic);
                 const std = await getStd(standardFont(rec ? rec.family : run.family, rec ? rec.bold : run.bold, rec ? rec.italic : run.italic));
-                const emb = run.fontKey && styleSame ? await getEmbedded(run.fontKey) : null;
+                // Pick the embed source: the run's own font if it has a program, else a sibling
+                // with the same base name that does (e.g. a Type3 font borrowing its CID twin).
+                let embKey;
+                if (run.fontKey && styleSame && rec) {
+                    if (rec.data?.length)
+                        embKey = run.fontKey;
+                    else {
+                        const donor = findDonor(rec.baseName, (r) => !!r.data?.length);
+                        if (donor)
+                            embKey = donor[0];
+                    }
+                }
+                const emb = embKey ? await getEmbedded(embKey) : null;
                 if (space)
                     return { font: emb ?? std, text: " " };
                 if (emb && covers(emb, part))
