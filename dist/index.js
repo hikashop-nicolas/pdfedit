@@ -46,7 +46,17 @@ function injectStyles() {
     }
     .pdfedit-para:focus, .pdfedit-para.pdfedit-edited { opacity:1; background:var(--bg,#fff); }
     .pdfedit-para:focus { box-shadow:0 0 0 2px #6e7bff; }
-    .pdfedit-img { position:absolute; cursor:move; outline:1px dashed rgba(110,123,255,.7); }
+    .pdfedit-img { position:absolute; cursor:move; outline:1px dashed rgba(110,123,255,.9); }
+    .pdfedit-img img { display:block; width:100%; height:auto; pointer-events:none; }
+    .pdfedit-img-handle {
+      position:absolute; right:-7px; bottom:-7px; width:14px; height:14px; box-sizing:border-box;
+      background:#6e7bff; border:2px solid #fff; border-radius:3px; cursor:nwse-resize;
+    }
+    .pdfedit-img-del {
+      position:absolute; right:-9px; top:-9px; width:18px; height:18px; box-sizing:border-box;
+      background:#e4484f; color:#fff; border:2px solid #fff; border-radius:50%; cursor:pointer;
+      font:700 12px/14px system-ui, sans-serif; text-align:center;
+    }
   `;
     document.head.appendChild(s);
 }
@@ -475,8 +485,15 @@ export function createPdfEditor(container, bytes, options = {}) {
                     if (donor)
                         span.style.fontFamily = `'${donor[1].cssName}', ${span.style.fontFamily}`;
                 }
-                if (rec.synthBold)
+                if (rec.synthBold) {
+                    // Keep font-weight:bold as the export signal (parseRuns reads it), but render the
+                    // bold via a text-shadow double-strike instead of the browser's synthetic bold,
+                    // which some browsers/fonts don't apply to a regular-only @font-face. This also
+                    // matches how export emulates the weight.
                     span.style.fontWeight = "bold";
+                    span.style.fontSynthesis = "none";
+                    span.style.textShadow = "0.35px 0 0 currentColor";
+                }
             });
         }
     };
@@ -654,39 +671,81 @@ export function createPdfEditor(container, bytes, options = {}) {
         if (!target)
             return;
         const bytesImg = new Uint8Array(await file.arrayBuffer());
+        const box = document.createElement("div");
+        box.className = "pdfedit-img";
+        box.style.left = "40px";
+        box.style.top = "40px";
+        box.style.width = "160px";
         const img = document.createElement("img");
-        img.className = "pdfedit-img";
-        const url = URL.createObjectURL(new Blob([bytesImg], { type: file.type }));
-        img.src = url;
-        img.style.left = "40px";
-        img.style.top = "40px";
-        img.style.width = "160px";
+        img.src = URL.createObjectURL(new Blob([bytesImg], { type: file.type }));
         img.draggable = false;
-        target.el.appendChild(img);
-        makeDraggable(img);
-        const rec = { page: target.index, bytes: bytesImg, mime: file.type, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: img };
-        img.addEventListener("load", () => updateImageRect(rec, target.viewport), { once: true });
+        const handle = document.createElement("div");
+        handle.className = "pdfedit-img-handle";
+        handle.title = "Drag to resize";
+        const del = document.createElement("div");
+        del.className = "pdfedit-img-del";
+        del.textContent = "×";
+        del.title = "Delete image";
+        box.append(img, handle, del);
+        target.el.appendChild(box);
+        const rec = { page: target.index, bytes: bytesImg, mime: file.type, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box };
         images.push(rec);
+        img.addEventListener("load", () => updateImageRect(rec, target.viewport), { once: true });
+        makeDraggable(box);
+        makeResizable(box, handle, rec);
+        del.addEventListener("pointerdown", (e) => e.stopPropagation());
+        del.addEventListener("click", (e) => {
+            e.stopPropagation();
+            box.remove();
+            const i = images.indexOf(rec);
+            if (i >= 0)
+                images.splice(i, 1);
+            change();
+        });
         change();
     }
-    function makeDraggable(img) {
-        img.addEventListener("pointerdown", (e) => {
+    const pageViewportOf = (el) => pageEls.find((p) => p.el === el.parentElement)?.viewport;
+    function makeDraggable(box) {
+        box.addEventListener("pointerdown", (e) => {
+            if (e.target !== box && e.target.tagName !== "IMG")
+                return; // not on handle/delete
             e.preventDefault();
             const startX = e.clientX;
             const startY = e.clientY;
-            const left = parseFloat(img.style.left);
-            const top = parseFloat(img.style.top);
+            const left = parseFloat(box.style.left);
+            const top = parseFloat(box.style.top);
             const move = (ev) => {
-                img.style.left = `${left + ev.clientX - startX}px`;
-                img.style.top = `${top + ev.clientY - startY}px`;
+                box.style.left = `${left + ev.clientX - startX}px`;
+                box.style.top = `${top + ev.clientY - startY}px`;
             };
             const up = () => {
                 document.removeEventListener("pointermove", move);
                 document.removeEventListener("pointerup", up);
-                const rec = images.find((r) => r.el === img);
-                const pg = pageEls.find((p) => p.el === img.parentElement);
-                if (rec && pg)
-                    updateImageRect(rec, pg.viewport);
+                const rec = images.find((r) => r.el === box);
+                const vp = pageViewportOf(box);
+                if (rec && vp)
+                    updateImageRect(rec, vp);
+                change();
+            };
+            document.addEventListener("pointermove", move);
+            document.addEventListener("pointerup", up);
+        });
+    }
+    function makeResizable(box, handle, rec) {
+        handle.addEventListener("pointerdown", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const startX = e.clientX;
+            const startW = box.offsetWidth;
+            const move = (ev) => {
+                box.style.width = `${Math.max(20, startW + (ev.clientX - startX))}px`; // height is auto, keeps aspect
+            };
+            const up = () => {
+                document.removeEventListener("pointermove", move);
+                document.removeEventListener("pointerup", up);
+                const vp = pageViewportOf(box);
+                if (vp)
+                    updateImageRect(rec, vp);
                 change();
             };
             document.addEventListener("pointermove", move);
