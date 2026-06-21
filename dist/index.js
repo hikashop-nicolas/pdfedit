@@ -520,7 +520,11 @@ export function createPdfEditor(container, bytes, options = {}) {
         const paraEl = elx.closest(".pdfedit-para");
         if (!paraEl)
             return;
-        savedRange = r.cloneRange();
+        // Only remember a real (non-empty) selection. A collapsed caret, e.g. the one left
+        // behind when clicking a toolbar control, must not overwrite the selection the user
+        // wants to style, or color/size would have nothing to apply to.
+        if (!r.collapsed)
+            savedRange = r.cloneRange();
         const para = paragraphs.find((p) => p.el === paraEl) ?? null;
         if (para) {
             savedPara = para;
@@ -535,11 +539,14 @@ export function createPdfEditor(container, bytes, options = {}) {
         el.className = "pdfedit-toolbar";
         const keepSel = (b) => b.addEventListener("mousedown", (e) => e.preventDefault());
         const exec = (cmd, val) => document.execCommand(cmd, false, val);
-        const wrapSel = (cssProp, value) => {
-            const sel = document.getSelection();
-            if (!sel || sel.rangeCount === 0 || sel.isCollapsed)
+        // Apply a CSS property to the saved selection by operating on the Range OBJECT
+        // directly (not the live document selection). Range methods don't need focus, so this
+        // works even after clicking a toolbar input moved focus away from the paragraph, which
+        // is why color/font/size do NOT go through withSel/execCommand.
+        const applyStyle = (cssProp, value) => {
+            const range = savedRange;
+            if (!range || range.collapsed)
                 return;
-            const range = sel.getRangeAt(0);
             const span = document.createElement("span");
             span.style.setProperty(cssProp, value);
             try {
@@ -550,14 +557,19 @@ export function createPdfEditor(container, bytes, options = {}) {
                 range.insertNode(span);
             }
             // Inner spans carry their own inline style; clear this one property on them so the
-            // wrapper's new value actually wins instead of being overridden by a nested span.
+            // wrapper's new value wins instead of being overridden by a nested span.
             span.querySelectorAll("*").forEach((e) => e.style.removeProperty(cssProp));
             const r = document.createRange();
             r.selectNodeContents(span);
-            sel.removeAllRanges();
-            sel.addRange(r);
+            savedRange = r; // keep the styled run selected so styles can be chained
+            if (savedPara) {
+                savedPara.dirty = true;
+                savedPara.el.classList.add("pdfedit-edited");
+            }
+            change();
         };
-        // Restore the saved paragraph selection, run the styling op, mark dirty.
+        // Restore the saved paragraph selection, run the styling op, mark dirty. Used by the
+        // execCommand-based controls (bold/italic/link), which need the live selection.
         const withSel = (fn) => {
             if (savedPara) {
                 savedPara.el.focus();
@@ -601,14 +613,14 @@ export function createPdfEditor(container, bytes, options = {}) {
         color.type = "color";
         color.title = "Text color";
         color.value = "#000000";
-        color.addEventListener("change", () => withSel(() => wrapSel("color", color.value)));
+        color.addEventListener("change", () => applyStyle("color", color.value));
         el.append(color);
         const font = document.createElement("select");
         font.title = "Font";
         for (const [v, label] of [["sans", "Sans"], ["serif", "Serif"], ["mono", "Mono"]]) {
             font.add(new Option(label, v));
         }
-        font.addEventListener("change", () => withSel(() => wrapSel("font-family", cssFamily(font.value))));
+        font.addEventListener("change", () => applyStyle("font-family", cssFamily(font.value)));
         el.append(font);
         const size = document.createElement("input");
         size.type = "number";
@@ -617,7 +629,7 @@ export function createPdfEditor(container, bytes, options = {}) {
         size.title = "Font size (pt)";
         size.addEventListener("change", () => {
             if (size.value)
-                withSel(() => wrapSel("font-size", `${(Number(size.value) * scale).toFixed(2)}px`));
+                applyStyle("font-size", `${(Number(size.value) * scale).toFixed(2)}px`);
         });
         el.append(size);
         el.append(sep(), iconBtn(ICON.left, "Align left", () => setAlign("left")), iconBtn(ICON.center, "Align center", () => setAlign("center")), iconBtn(ICON.right, "Align right", () => setAlign("right")), iconBtn(ICON.justify, "Justify", () => setAlign("justify")), sep());
