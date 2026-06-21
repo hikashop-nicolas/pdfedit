@@ -22,7 +22,9 @@
     "prepare": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "vite",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "npm run build:demo && start-server-and-test 'vite preview --port 5173 --strictPort' http://localhost:5173 'cypress run --browser chrome'",
+    "test:e2e:open": "start-server-and-test 'vite --port 5173 --strictPort' http://localhost:5173 'cypress open'"
   },
   "dependencies": {
     "@pdf-lib/fontkit": "^1.1.1",
@@ -30,6 +32,8 @@
     "pdfjs-dist": "^6.0.227"
   },
   "devDependencies": {
+    "cypress": "^15.17.0",
+    "start-server-and-test": "^3.0.11",
     "typescript": "^6.0.3",
     "vite": "^8.0.16"
   }
