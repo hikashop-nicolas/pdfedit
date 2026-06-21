@@ -531,6 +531,20 @@ export function createPdfEditor(container, bytes, options = {}) {
                     if (d.length) {
                         data = d;
                         cssName = registerFace(fontName, d);
+                        // pdf.js omits weight/style for CID subsets; read them from the font program's
+                        // OS/2 / head tables (reliable) so bold and italic survive editing.
+                        try {
+                            const ft = fontkit.create(d);
+                            const weight = ft["OS/2"]?.usWeightClass;
+                            const mac = ft.head?.macStyle;
+                            if ((typeof weight === "number" && weight >= 600) || mac?.bold)
+                                bold = true;
+                            if (mac?.italic)
+                                italic = true;
+                        }
+                        catch {
+                            /* not a parseable sfnt; keep name/flag-based detection */
+                        }
                     }
                 }
             }
@@ -1122,6 +1136,13 @@ export function createPdfEditor(container, bytes, options = {}) {
                 const topY = first.y + size * 0.85;
                 const bottomY = lines[lines.length - 1].y - size * 0.3;
                 const align = detectAlign(lines, boxX, boxRight, pageW);
+                // Soft wrap (flowing paragraph) vs hard line breaks (address / list): a flowing
+                // paragraph's non-last lines each reach near the right edge (they broke because the
+                // next word did not fit). If most lines instead end short, the breaks are intentional
+                // and must be preserved as <br> rather than reflowed with a space.
+                const bodyLines = lines.slice(0, -1);
+                const fullCount = bodyLines.filter((l) => l.maxX >= boxRight - size * 2).length;
+                const flowing = align === "justify" || (bodyLines.length >= 1 && fullCount >= Math.ceil(bodyLines.length * 0.6));
                 const firstRec = getFontRec(page, first.items[0].fontName);
                 const famCss = (rec) => (rec.cssName ? `'${rec.cssName}', ${cssFamily(rec.family)}` : cssFamily(rec.family));
                 const tl = viewport.convertToViewportPoint(boxX, topY);
@@ -1193,8 +1214,15 @@ export function createPdfEditor(container, bytes, options = {}) {
                         curText += it.str;
                         prevEnd = it.x + itemWidth(it);
                     }
-                    if (li !== lastLi)
-                        curText += " ";
+                    if (li !== lastLi) {
+                        if (flowing) {
+                            curText += " "; // soft wrap: reflow as one paragraph
+                        }
+                        else {
+                            flushSpan(); // hard break: preserve the line return
+                            html += "<br>";
+                        }
+                    }
                 });
                 flushSpan();
                 // Dominant font (most characters): used for the block element and as the fallback
