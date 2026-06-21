@@ -535,13 +535,13 @@ export function createPdfEditor(container, bytes, options = {}) {
         el.className = "pdfedit-toolbar";
         const keepSel = (b) => b.addEventListener("mousedown", (e) => e.preventDefault());
         const exec = (cmd, val) => document.execCommand(cmd, false, val);
-        const wrapSel = (styleText) => {
+        const wrapSel = (cssProp, value) => {
             const sel = document.getSelection();
             if (!sel || sel.rangeCount === 0 || sel.isCollapsed)
                 return;
             const range = sel.getRangeAt(0);
             const span = document.createElement("span");
-            span.setAttribute("style", styleText);
+            span.style.setProperty(cssProp, value);
             try {
                 range.surroundContents(span);
             }
@@ -549,6 +549,13 @@ export function createPdfEditor(container, bytes, options = {}) {
                 span.appendChild(range.extractContents());
                 range.insertNode(span);
             }
+            // Inner spans carry their own inline style; clear this one property on them so the
+            // wrapper's new value actually wins instead of being overridden by a nested span.
+            span.querySelectorAll("*").forEach((e) => e.style.removeProperty(cssProp));
+            const r = document.createRange();
+            r.selectNodeContents(span);
+            sel.removeAllRanges();
+            sel.addRange(r);
         };
         // Restore the saved paragraph selection, run the styling op, mark dirty.
         const withSel = (fn) => {
@@ -594,14 +601,14 @@ export function createPdfEditor(container, bytes, options = {}) {
         color.type = "color";
         color.title = "Text color";
         color.value = "#000000";
-        color.addEventListener("change", () => withSel(() => exec("foreColor", color.value)));
+        color.addEventListener("change", () => withSel(() => wrapSel("color", color.value)));
         el.append(color);
         const font = document.createElement("select");
         font.title = "Font";
         for (const [v, label] of [["sans", "Sans"], ["serif", "Serif"], ["mono", "Mono"]]) {
             font.add(new Option(label, v));
         }
-        font.addEventListener("change", () => withSel(() => wrapSel(`font-family:${cssFamily(font.value)}`)));
+        font.addEventListener("change", () => withSel(() => wrapSel("font-family", cssFamily(font.value))));
         el.append(font);
         const size = document.createElement("input");
         size.type = "number";
@@ -610,7 +617,7 @@ export function createPdfEditor(container, bytes, options = {}) {
         size.title = "Font size (pt)";
         size.addEventListener("change", () => {
             if (size.value)
-                withSel(() => wrapSel(`font-size:${(Number(size.value) * scale).toFixed(2)}px`));
+                withSel(() => wrapSel("font-size", `${(Number(size.value) * scale).toFixed(2)}px`));
         });
         el.append(size);
         el.append(sep(), iconBtn(ICON.left, "Align left", () => setAlign("left")), iconBtn(ICON.center, "Align center", () => setAlign("center")), iconBtn(ICON.right, "Align right", () => setAlign("right")), iconBtn(ICON.justify, "Justify", () => setAlign("justify")), sep());
