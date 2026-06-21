@@ -41,7 +41,7 @@ describe("pdfedit toolbar", () => {
   it("renders the PDF", () => {
     openFixture();
     cy.get(".pdfedit-page").should("have.length.greaterThan", 0);
-    cy.get(".pdfedit-toolbar input[type=number]").should("exist");
+    cy.get('input[title="Font size (pt)"]').should("exist");
     cy.get(".pdfedit-toolbar input[type=color]").should("exist");
   });
 
@@ -49,8 +49,8 @@ describe("pdfedit toolbar", () => {
     openFixture();
     selectInFirstPara(0, 5);
     // Real interaction: clicking the number input blurs the paragraph.
-    cy.get(".pdfedit-toolbar input[type=number]").clear().type("26{enter}");
-    cy.get(".pdfedit-toolbar input[type=number]").should("have.value", "26");
+    cy.get('input[title="Font size (pt)"]').clear().type("26{enter}");
+    cy.get('input[title="Font size (pt)"]').should("have.value", "26");
     cy.window().then((win) => {
       const para = win.document.querySelector<HTMLElement>(".pdfedit-para")!;
       const big = [...para.querySelectorAll("span")].some((s) => parseFloat(getComputedStyle(s).fontSize) >= 30); // 26pt * 1.3
@@ -78,11 +78,23 @@ describe("pdfedit toolbar", () => {
     cy.get(".pdfedit-toolbar input[type=color]").should("have.value", "#cc0000");
   });
 
+  it("zooms the page via the percentage input and the slider", () => {
+    openFixture();
+    // via the percentage input
+    cy.get(".pdfedit-zoom input[type=number]").clear().type("200{enter}");
+    cy.get(".pdfedit-page").first().should(($p) => expect($p[0].style.zoom).to.eq("2"));
+    cy.get(".pdfedit-zoom input[type=range]").should("have.value", "200");
+    // via the slider
+    cy.get(".pdfedit-zoom input[type=range]").invoke("val", "50").trigger("input");
+    cy.get(".pdfedit-page").first().should(($p) => expect($p[0].style.zoom).to.eq("0.5"));
+    cy.get(".pdfedit-zoom input[type=number]").should("have.value", "50");
+  });
+
   it("keeps the paragraph visible (active) while a toolbar control has focus", () => {
     openFixture();
     selectInFirstPara(0, 6);
     // Real click (sets relatedTarget) so the paragraph blur keeps it active + highlighted.
-    cy.get(".pdfedit-toolbar input[type=number]").click();
+    cy.get('input[title="Font size (pt)"]').click();
     cy.get(".pdfedit-para.pdfedit-active").should("exist");
     cy.window().then((win) => {
       const hl = (win as unknown as { CSS?: { highlights?: { has(k: string): boolean } } }).CSS?.highlights;

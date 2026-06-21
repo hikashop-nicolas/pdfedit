@@ -137,6 +137,8 @@ function injectStyles(): void {
       border-radius:5px; cursor:pointer;
     }
     .pdfedit-toolbar .sep { width:1px; align-self:stretch; background:#4a4f57; margin:0 2px; }
+    .pdfedit-toolbar .pdfedit-zoom { display:inline-flex; align-items:center; gap:6px; }
+    .pdfedit-toolbar input[type=range] { width:110px; cursor:pointer; accent-color:#6e7bff; }
     .pdfedit-root {
       flex:1; min-height:0; overflow:auto; box-sizing:border-box;
       display:flex; flex-direction:column; align-items:center; gap:16px; padding:16px; background:#525659;
@@ -435,6 +437,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   const paragraphs: Paragraph[] = [];
   const images: ImageItem[] = [];
   const pageEls: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number }[] = [];
+  let displayZoom = 1; // visual zoom only; render scale and PDF coordinates are unchanged
+  const applyZoom = (z: number) => {
+    displayZoom = z;
+    for (const p of pageEls) p.el.style.zoom = String(z);
+  };
   let destroyed = false;
   let activePara: Paragraph | null = null;
   let savedPara: Paragraph | null = null;
@@ -772,6 +779,38 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     });
     el.append(imageInput);
 
+    // Zoom: a slider + a percentage input, kept in sync. Scales the displayed pages only.
+    el.append(sep());
+    const zoomWrap = document.createElement("span");
+    zoomWrap.className = "pdfedit-zoom";
+    const zlabel = document.createElement("span");
+    zlabel.textContent = "Zoom";
+    const zrange = document.createElement("input");
+    zrange.type = "range";
+    zrange.min = "25";
+    zrange.max = "400";
+    zrange.step = "5";
+    zrange.value = "100";
+    zrange.title = "Zoom";
+    const znum = document.createElement("input");
+    znum.type = "number";
+    znum.min = "25";
+    znum.max = "400";
+    znum.value = "100";
+    znum.title = "Zoom (%)";
+    const zpct = document.createElement("span");
+    zpct.textContent = "%";
+    const setZoom = (pct: number) => {
+      const p = Math.max(25, Math.min(400, Math.round(pct || 100)));
+      zrange.value = String(p);
+      znum.value = String(p);
+      applyZoom(p / 100);
+    };
+    zrange.addEventListener("input", () => setZoom(Number(zrange.value)));
+    znum.addEventListener("change", () => setZoom(Number(znum.value)));
+    zoomWrap.append(zlabel, zrange, znum, zpct);
+    el.append(zoomWrap);
+
     const update = (o: { sizePt?: number; family?: Family; colorHex?: string }) => {
       if (o.sizePt != null && isFinite(o.sizePt)) size.value = String(Math.round(o.sizePt));
       if (o.family) font.value = o.family;
@@ -897,6 +936,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       pageEl.className = "pdfedit-page";
       pageEl.style.width = `${viewport.width}px`;
       pageEl.style.height = `${viewport.height}px`;
+      pageEl.style.zoom = String(displayZoom);
       const canvas = document.createElement("canvas");
       canvas.width = Math.floor(viewport.width);
       canvas.height = Math.floor(viewport.height);
