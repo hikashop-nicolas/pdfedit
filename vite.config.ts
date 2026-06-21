@@ -12,4 +12,8 @@ export default defineConfig({
     target: "es2022",
   },
   server: { open: false },
+  test: {
+    root: ".",
+    include: ["src/**/*.test.ts"],
+  },
 });
