@@ -1188,10 +1188,21 @@ export function createPdfEditor(container, bytes, options = {}) {
                         const rec = getFontRec(page, it.fontName);
                         fontCount.set(it.fontName, (fontCount.get(it.fontName) ?? 0) + it.str.length);
                         const szR = Math.round(it.size * 10) / 10;
+                        const key = `${it.fontName}|${szR}`;
+                        const gap = prevEnd > -Infinity ? it.x - prevEnd : 0;
+                        // Decide the seam BEFORE any span flush so a space lands in the previous span
+                        // (a font change would otherwise have emptied curText and dropped it).
+                        if (prevEnd > -Infinity && gap < -it.size * 0.5) {
+                            flushSpan(); // overlapping items are stacked text (separate lines), not one line
+                            html += "<br>";
+                            curKey = "";
+                        }
+                        else if (prevEnd > -Infinity && gap > it.size * 0.2 && !/\s$/.test(curText) && !/^\s/.test(it.str)) {
+                            curText += " "; // positional gap with no whitespace (adjacent label/value)
+                        }
                         // Key by font identity (not just detected style) so a differently-fonted run,
                         // e.g. a bold subset whose name omits "Bold", still gets its own span and its
                         // own original font on export.
-                        const key = `${it.fontName}|${szR}`;
                         if (key !== curKey) {
                             flushSpan();
                             curKey = key;
@@ -1208,9 +1219,6 @@ export function createPdfEditor(container, bytes, options = {}) {
                             else
                                 curColor = fgHex;
                         }
-                        // Insert a space for a positional gap or strong overlap (adjacent label/value).
-                        if (prevEnd > -Infinity && wantSpace(it.x - prevEnd, it.size, curText, it.str))
-                            curText += " ";
                         curText += it.str;
                         prevEnd = it.x + itemWidth(it);
                     }
