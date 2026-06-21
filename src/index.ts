@@ -147,8 +147,10 @@ function injectStyles(): void {
       position:absolute; box-sizing:border-box; cursor:text; outline:none;
       color:var(--c,#000); opacity:0; white-space:pre-wrap; word-break:break-word; overflow:visible;
     }
-    .pdfedit-para:focus, .pdfedit-para.pdfedit-edited { opacity:1; background:var(--bg,#fff); }
-    .pdfedit-para:focus { box-shadow:0 0 0 2px #6e7bff; }
+    .pdfedit-para:focus, .pdfedit-para.pdfedit-edited, .pdfedit-para.pdfedit-active { opacity:1; background:var(--bg,#fff); }
+    .pdfedit-para:focus, .pdfedit-para.pdfedit-active { box-shadow:0 0 0 2px #6e7bff; }
+    /* Selection stays visible even when focus moves to a toolbar control. */
+    ::highlight(pdfedit-sel) { background-color:rgba(110,123,255,.4); }
     .pdfedit-img { position:absolute; cursor:move; outline:1px dashed rgba(110,123,255,.9); }
     .pdfedit-img img { display:block; width:100%; height:auto; pointer-events:none; }
     .pdfedit-img-handle {
@@ -188,11 +190,6 @@ function standardFont(f: Family, bold: boolean, italic: boolean): StandardFonts 
 const clamp255 = (n: number): number => Math.max(0, Math.min(255, Math.round(n)));
 const hex2 = (n: number): string => clamp255(n).toString(16).padStart(2, "0");
 const rgb255ToHex = (c: RGB): string => `#${hex2(c.r)}${hex2(c.g)}${hex2(c.b)}`;
-const rgb01ToHex = (c: RGB): string => `#${hex2(c.r * 255)}${hex2(c.g * 255)}${hex2(c.b * 255)}`;
-const parseRgbToHex = (s: string): string => {
-  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(s);
-  return m ? `#${hex2(+m[1]!)}${hex2(+m[2]!)}${hex2(+m[3]!)}` : "#000000";
-};
 const escapeHtml = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 let colorProbe: HTMLDivElement | null = null;
@@ -583,6 +580,28 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   // Track the selection inside a paragraph so toolbar controls that steal focus
   // (color/font/size pickers) can restore it before applying, and reflect the caret's
   // style back into the toolbar fields.
+  // Highlight the saved selection with the CSS Custom Highlight API so it stays visible
+  // when focus moves to a toolbar control (the native highlight only shows while the
+  // contenteditable is focused). Falls back to nothing on browsers without the API.
+  const cssHL = (window as unknown as { CSS?: { highlights?: { set(k: string, v: unknown): void; delete(k: string): void } } }).CSS?.highlights;
+  const HighlightCtor = (window as unknown as { Highlight?: new (r: Range) => unknown }).Highlight;
+  const showSavedHighlight = () => {
+    try {
+      if (!cssHL || !HighlightCtor) return;
+      if (savedRange && !savedRange.collapsed) cssHL.set("pdfedit-sel", new HighlightCtor(savedRange.cloneRange()));
+      else cssHL.delete("pdfedit-sel");
+    } catch {
+      /* ignore */
+    }
+  };
+  const clearHighlight = () => {
+    try {
+      cssHL?.delete("pdfedit-sel");
+    } catch {
+      /* ignore */
+    }
+  };
+
   const onSelChange = () => {
     const sel = document.getSelection();
     if (!sel || sel.rangeCount === 0) return;
@@ -601,8 +620,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       savedPara = para;
       activePara = para;
     }
+    // Note: deliberately do NOT sync the color swatch to the selection's color, so the
+    // user's chosen color persists across selections (apply one color to several runs).
     const cs = getComputedStyle(elx);
-    toolbar.update({ sizePt: parseFloat(cs.fontSize) / scale, family: familyOf(cs.fontFamily), colorHex: parseRgbToHex(cs.color) });
+    toolbar.update({ sizePt: parseFloat(cs.fontSize) / scale, family: familyOf(cs.fontFamily) });
   };
   document.addEventListener("selectionchange", onSelChange);
 
@@ -636,6 +657,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         savedPara.dirty = true;
         savedPara.el.classList.add("pdfedit-edited");
       }
+      showSavedHighlight(); // keep the (now styled) selection visible while a control has focus
       change();
     };
     // Restore the saved paragraph selection, run the styling op, mark dirty. Used by the
@@ -1037,7 +1059,23 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         el.addEventListener("focus", () => {
           activePara = para;
           savedPara = para;
-          toolbar.update({ sizePt: para.size, family: para.family, colorHex: rgb01ToHex(para.color) });
+          // Mark this paragraph active (keeps its border + visible overlay even after focus
+          // moves to a toolbar control); the native selection shows while it's focused.
+          for (const p of paragraphs) p.el.classList.toggle("pdfedit-active", p === para);
+          clearHighlight();
+          toolbar.update({ sizePt: para.size, family: para.family });
+        });
+        // When focus moves to a toolbar control, keep this paragraph active and paint the
+        // saved selection ourselves (the native highlight hides on blur). When focus leaves
+        // the editor entirely, drop the active state so the page shows normally again.
+        el.addEventListener("blur", (e) => {
+          const to = e.relatedTarget as Node | null;
+          if (to && toolbar.el.contains(to)) {
+            showSavedHighlight();
+          } else {
+            el.classList.remove("pdfedit-active");
+            clearHighlight();
+          }
         });
         el.addEventListener("input", () => {
           para.dirty = true;
