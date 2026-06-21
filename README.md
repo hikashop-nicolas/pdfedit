@@ -4,6 +4,9 @@ A standalone, framework-agnostic, client-side **PDF text editor**. It renders a 
 with pdf.js, overlays an editable text layer extracted from the document, and exports
 the edited PDF with pdf-lib. No server, no upload.
 
+**[▶ Live demo](https://hikashop-nicolas.github.io/pdfedit/)** — open a PDF, edit the
+text, and download the result, entirely in your browser.
+
 ```ts
 import { createPdfEditor } from "pdfedit";
 import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url"; // your bundler resolves this
@@ -33,8 +36,9 @@ const editedBytes = await editor.getBytes();
 
 ```
 npm install
-npm run dev     # standalone demo (open a PDF, edit text, download)
-npm run build   # compile the library to dist/ (tsc)
+npm run dev       # standalone demo (open a PDF, edit text, download)
+npm run build     # compile the library to dist/ (tsc)
+npm run test:e2e  # Cypress end-to-end tests (Chrome) against the built demo
 ```
 
 ## Use from another local project

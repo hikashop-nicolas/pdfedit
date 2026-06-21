@@ -58,8 +58,13 @@ function injectStyles() {
     }
     .pdfedit-img-del {
       position:absolute; right:-9px; top:-9px; width:18px; height:18px; box-sizing:border-box;
-      background:#e4484f; color:#fff; border:2px solid #fff; border-radius:50%; cursor:pointer;
+      padding:0; background:#e4484f; color:#fff; border:2px solid #fff; border-radius:50%; cursor:pointer;
       font:700 12px/14px system-ui, sans-serif; text-align:center;
+    }
+    .pdfedit-img:focus-visible { outline:2px solid #6e7bff; outline-offset:2px; }
+    .pdfedit-toolbar button:focus-visible, .pdfedit-toolbar select:focus-visible,
+    .pdfedit-toolbar input:focus-visible, .pdfedit-img-del:focus-visible {
+      outline:2px solid #fff; outline-offset:1px;
     }
   `;
     document.head.appendChild(s);
@@ -570,6 +575,8 @@ export function createPdfEditor(container, bytes, options = {}) {
     function buildToolbar() {
         const el = document.createElement("div");
         el.className = "pdfedit-toolbar";
+        el.setAttribute("role", "toolbar");
+        el.setAttribute("aria-label", "PDF editor tools");
         const keepSel = (b) => b.addEventListener("mousedown", (e) => e.preventDefault());
         const exec = (cmd, val) => document.execCommand(cmd, false, val);
         // Apply a CSS property to the saved selection by operating on the Range OBJECT
@@ -621,8 +628,10 @@ export function createPdfEditor(container, bytes, options = {}) {
         };
         const textBtn = (label, title, css, fn) => {
             const b = document.createElement("button");
+            b.type = "button";
             b.textContent = label;
             b.title = title;
+            b.setAttribute("aria-label", title); // "B"/"I" alone are not descriptive names
             if (css)
                 b.style.cssText = css;
             b.addEventListener("click", () => withSel(fn));
@@ -631,8 +640,11 @@ export function createPdfEditor(container, bytes, options = {}) {
         };
         const iconBtn = (svg, title, fn) => {
             const b = document.createElement("button");
+            b.type = "button";
             b.innerHTML = svg;
             b.title = title;
+            b.setAttribute("aria-label", title); // icon-only button needs an accessible name
+            b.firstElementChild?.setAttribute("aria-hidden", "true"); // the SVG is decorative
             b.addEventListener("click", () => withSel(fn));
             keepSel(b);
             return b;
@@ -646,11 +658,13 @@ export function createPdfEditor(container, bytes, options = {}) {
         const color = document.createElement("input");
         color.type = "color";
         color.title = "Text color";
+        color.setAttribute("aria-label", "Text color");
         color.value = "#000000";
         color.addEventListener("change", () => applyStyle("color", color.value));
         el.append(color);
         const font = document.createElement("select");
         font.title = "Font";
+        font.setAttribute("aria-label", "Font family");
         for (const [v, label] of [["sans", "Sans"], ["serif", "Serif"], ["mono", "Mono"]]) {
             font.add(new Option(label, v));
         }
@@ -661,6 +675,7 @@ export function createPdfEditor(container, bytes, options = {}) {
         size.min = "4";
         size.max = "300";
         size.title = "Font size (pt)";
+        size.setAttribute("aria-label", "Font size in points");
         size.addEventListener("change", () => {
             if (size.value)
                 applyStyle("font-size", `${(Number(size.value) * scale).toFixed(2)}px`);
@@ -668,8 +683,10 @@ export function createPdfEditor(container, bytes, options = {}) {
         el.append(size);
         el.append(sep(), iconBtn(ICON.left, "Align left", () => setAlign("left")), iconBtn(ICON.center, "Align center", () => setAlign("center")), iconBtn(ICON.right, "Align right", () => setAlign("right")), iconBtn(ICON.justify, "Justify", () => setAlign("justify")), sep());
         const linkBtn = document.createElement("button");
+        linkBtn.type = "button";
         linkBtn.textContent = "Link";
         linkBtn.title = "Add/edit link";
+        linkBtn.setAttribute("aria-label", "Add or edit link");
         keepSel(linkBtn);
         linkBtn.addEventListener("click", () => {
             const url = prompt("Link URL (empty to remove):", "https://");
@@ -684,14 +701,18 @@ export function createPdfEditor(container, bytes, options = {}) {
         });
         el.append(linkBtn);
         const imgBtn = document.createElement("button");
+        imgBtn.type = "button";
         imgBtn.textContent = "Image";
         imgBtn.title = "Insert image";
+        imgBtn.setAttribute("aria-label", "Insert image");
         keepSel(imgBtn);
         imgBtn.addEventListener("click", () => imageInput.click());
         el.append(imgBtn);
         const imageInput = document.createElement("input");
         imageInput.type = "file";
         imageInput.accept = "image/png,image/jpeg";
+        imageInput.tabIndex = -1;
+        imageInput.setAttribute("aria-hidden", "true");
         imageInput.style.display = "none";
         imageInput.addEventListener("change", () => {
             const f = imageInput.files?.[0];
@@ -706,6 +727,7 @@ export function createPdfEditor(container, bytes, options = {}) {
         zoomWrap.className = "pdfedit-zoom";
         const zlabel = document.createElement("span");
         zlabel.textContent = "Zoom";
+        zlabel.setAttribute("aria-hidden", "true"); // controls below carry their own labels
         const zrange = document.createElement("input");
         zrange.type = "range";
         zrange.min = "25";
@@ -713,12 +735,14 @@ export function createPdfEditor(container, bytes, options = {}) {
         zrange.step = "5";
         zrange.value = "100";
         zrange.title = "Zoom";
+        zrange.setAttribute("aria-label", "Zoom level (percent)");
         const znum = document.createElement("input");
         znum.type = "number";
         znum.min = "25";
         znum.max = "400";
         znum.value = "100";
         znum.title = "Zoom (%)";
+        znum.setAttribute("aria-label", "Zoom percent");
         const zpct = document.createElement("span");
         zpct.textContent = "%";
         const setZoom = (pct) => {
@@ -757,19 +781,26 @@ export function createPdfEditor(container, bytes, options = {}) {
         const bytesImg = new Uint8Array(await file.arrayBuffer());
         const box = document.createElement("div");
         box.className = "pdfedit-img";
+        box.tabIndex = 0; // keyboard focusable
+        box.setAttribute("role", "group");
+        box.setAttribute("aria-label", "Inserted image. Arrow keys move it, plus and minus resize, Delete removes.");
         box.style.left = "40px";
         box.style.top = "40px";
         box.style.width = "160px";
         const img = document.createElement("img");
         img.src = URL.createObjectURL(new Blob([bytesImg], { type: file.type }));
         img.draggable = false;
+        img.alt = "";
         const handle = document.createElement("div");
         handle.className = "pdfedit-img-handle";
         handle.title = "Drag to resize";
-        const del = document.createElement("div");
+        handle.setAttribute("aria-hidden", "true"); // mouse affordance; keyboard uses +/- on the box
+        const del = document.createElement("button");
+        del.type = "button";
         del.className = "pdfedit-img-del";
         del.textContent = "×";
         del.title = "Delete image";
+        del.setAttribute("aria-label", "Delete image");
         box.append(img, handle, del);
         target.el.appendChild(box);
         const rec = { page: target.index, bytes: bytesImg, mime: file.type, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box };
@@ -777,15 +808,71 @@ export function createPdfEditor(container, bytes, options = {}) {
         img.addEventListener("load", () => updateImageRect(rec, target.viewport), { once: true });
         makeDraggable(box);
         makeResizable(box, handle, rec);
-        del.addEventListener("pointerdown", (e) => e.stopPropagation());
-        del.addEventListener("click", (e) => {
-            e.stopPropagation();
+        const sync = () => {
+            const vp = pageViewportOf(box);
+            if (vp)
+                updateImageRect(rec, vp);
+            change();
+        };
+        const removeImage = () => {
             box.remove();
             const i = images.indexOf(rec);
             if (i >= 0)
                 images.splice(i, 1);
             change();
+        };
+        const moveBy = (dx, dy) => {
+            box.style.left = `${parseFloat(box.style.left) + dx}px`;
+            box.style.top = `${parseFloat(box.style.top) + dy}px`;
+            sync();
+        };
+        const resizeBy = (dw) => {
+            box.style.width = `${Math.max(20, box.offsetWidth + dw)}px`; // height auto keeps aspect
+            sync();
+        };
+        del.addEventListener("pointerdown", (e) => e.stopPropagation());
+        del.addEventListener("click", (e) => {
+            e.stopPropagation();
+            removeImage();
         });
+        // Keyboard control when the image box has focus.
+        box.addEventListener("keydown", (e) => {
+            const step = e.shiftKey ? 20 : 5;
+            switch (e.key) {
+                case "ArrowLeft":
+                    e.preventDefault();
+                    moveBy(-step, 0);
+                    break;
+                case "ArrowRight":
+                    e.preventDefault();
+                    moveBy(step, 0);
+                    break;
+                case "ArrowUp":
+                    e.preventDefault();
+                    moveBy(0, -step);
+                    break;
+                case "ArrowDown":
+                    e.preventDefault();
+                    moveBy(0, step);
+                    break;
+                case "+":
+                case "=":
+                    e.preventDefault();
+                    resizeBy(e.shiftKey ? 40 : 10);
+                    break;
+                case "-":
+                case "_":
+                    e.preventDefault();
+                    resizeBy(e.shiftKey ? -40 : -10);
+                    break;
+                case "Delete":
+                case "Backspace":
+                    e.preventDefault();
+                    removeImage();
+                    break;
+            }
+        });
+        box.focus(); // newly inserted image gets focus so it can be positioned by keyboard
         change();
     }
     const pageViewportOf = (el) => pageEls.find((p) => p.el === el.parentElement)?.viewport;
@@ -862,6 +949,7 @@ export function createPdfEditor(container, bytes, options = {}) {
             const canvas = document.createElement("canvas");
             canvas.width = Math.floor(viewport.width);
             canvas.height = Math.floor(viewport.height);
+            canvas.setAttribute("aria-hidden", "true"); // visual render; the text is in the overlay
             const cctx = canvas.getContext("2d");
             if (cctx)
                 await page.render({ canvasContext: cctx, viewport, canvas }).promise;
