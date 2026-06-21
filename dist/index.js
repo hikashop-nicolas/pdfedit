@@ -90,6 +90,20 @@ const clamp255 = (n) => Math.max(0, Math.min(255, Math.round(n)));
 const hex2 = (n) => clamp255(n).toString(16).padStart(2, "0");
 const rgb255ToHex = (c) => `#${hex2(c.r)}${hex2(c.g)}${hex2(c.b)}`;
 const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// Symbol-flagged subset fonts with no ToUnicode CMap map each byte c to glyph U+F000+c
+// (the (3,0) "symbol" cmap convention). pdf.js returns those Private Use Area code points
+// verbatim, so the editable overlay renders them as tofu (squares). Map the F0xx range
+// back to its low byte to recover readable text (e.g. U+F04D -> "M").
+const normalizePua = (s) => {
+    if (!/[\uF000-\uF0FF]/.test(s))
+        return s;
+    let out = "";
+    for (const ch of s) {
+        const cp = ch.charCodeAt(0);
+        out += cp >= 0xf001 && cp <= 0xf0ff ? String.fromCharCode(cp - 0xf000) : ch;
+    }
+    return out;
+};
 let colorProbe = null;
 function cssColorToRgb(str, fallback) {
     if (!str)
@@ -961,7 +975,7 @@ export function createPdfEditor(container, bytes, options = {}) {
                 if (!("str" in item) || item.str === "")
                     continue;
                 const t = item.transform;
-                allItems.push({ str: item.str, x: t[4], y: t[5], w: item.width ?? 0, size: Math.hypot(t[2], t[3]) || 10, fontName: item.fontName });
+                allItems.push({ str: normalizePua(item.str), x: t[4], y: t[5], w: item.width ?? 0, size: Math.hypot(t[2], t[3]) || 10, fontName: item.fontName });
             }
             // Drop hidden text layers: some PDFs (e.g. Google Docs / OCR exports) draw the
             // visible glyphs with an embedded/Type3 font and overlay an invisible copy in a
