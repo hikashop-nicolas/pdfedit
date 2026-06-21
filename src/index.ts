@@ -324,55 +324,119 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 };
 
+// A large horizontal gap between items sharing a baseline marks a column / block boundary
+// (e.g. a left-aligned footer and a right-aligned page number sit on the same baseline but
+// are separate blocks). Gaps wider than this many ems split a baseline into segments.
+const COL_GAP_EM = 2.2;
+
 function buildLines(items: RunItem[]): Line[] {
+  // 1) group items into baselines (same y within tolerance)
   const sorted = items.slice().sort((a, b) => b.y - a.y || a.x - b.x);
-  const lines: Line[] = [];
+  const baselines: RunItem[][] = [];
+  let curY = 0;
+  let curSize = 0;
   for (const it of sorted) {
-    const last = lines[lines.length - 1];
-    if (last && Math.abs(last.y - it.y) <= last.size * 0.4) {
-      last.items.push(it);
-      last.minX = Math.min(last.minX, it.x);
-      last.maxX = Math.max(last.maxX, it.x + it.w);
-      last.size = Math.max(last.size, it.size);
-    } else lines.push({ items: [it], y: it.y, minX: it.x, maxX: it.x + it.w, size: it.size, text: "" });
+    const base = baselines[baselines.length - 1];
+    if (base && Math.abs(curY - it.y) <= Math.max(curSize, it.size) * 0.4) {
+      base.push(it);
+      curSize = Math.max(curSize, it.size);
+    } else {
+      baselines.push([it]);
+      curY = it.y;
+      curSize = it.size;
+    }
   }
-  for (const ln of lines) {
-    ln.items.sort((a, b) => a.x - b.x);
-    ln.text = ln.items.map((i) => i.str).join("");
+  // 2) split each baseline into segments at large horizontal gaps. Some subset fonts
+  // report garbage glyph widths (advances many times the page width); cap to a plausible
+  // bound so one bad item can't inflate a segment's extent and swallow neighbours.
+  const widthOf = (it: RunItem) => {
+    const plausible = it.str.length * it.size * 1.5 + it.size;
+    return it.w > 0 && it.w <= plausible ? it.w : it.str.length * it.size * 0.5;
+  };
+  const lines: Line[] = [];
+  for (const base of baselines) {
+    base.sort((a, b) => a.x - b.x);
+    let seg: RunItem[] = [];
+    let segEnd = -Infinity;
+    const flush = () => {
+      if (!seg.length) return;
+      lines.push({
+        items: seg,
+        y: seg[0]!.y,
+        minX: seg[0]!.x,
+        maxX: Math.max(...seg.map((i) => i.x + widthOf(i))),
+        size: Math.max(...seg.map((i) => i.size)),
+        text: seg.map((i) => i.str).join(""),
+      });
+      seg = [];
+    };
+    for (const it of base) {
+      const em = Math.max(it.size, seg[seg.length - 1]?.size ?? it.size);
+      if (seg.length && it.x - segEnd > em * COL_GAP_EM) flush();
+      seg.push(it);
+      segEnd = Math.max(segEnd, it.x + widthOf(it));
+    }
+    flush();
   }
   return lines;
 }
 
-// Group lines into paragraphs. The key is telling a soft wrap (same paragraph) from a
-// paragraph break: calibrate to the document's actual line spacing (median gap) instead
-// of a fixed multiple of font size, and also break on a size change or a first-line
-// indent relative to the running paragraph.
+// Group line segments into paragraph blocks by 2D proximity: a segment joins a block when
+// it sits directly below the block's last line (within line spacing, same size) AND overlaps
+// it horizontally (or shares its left edge). This keeps side-by-side columns and stacked
+// address blocks as distinct, separately-clickable zones instead of one merged box.
+interface Block {
+  lines: Line[];
+  left: number;
+  right: number;
+  lastY: number;
+  lastSize: number;
+}
 function buildParagraphs(items: RunItem[]): Line[][] {
-  const lines = buildLines(items);
+  const segs = buildLines(items);
+  if (!segs.length) return [];
+  // line-spacing estimate from distinct baselines
+  const ys = Array.from(new Set(segs.map((s) => Math.round(s.y)))).sort((a, b) => b - a);
   const gaps: number[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const g = lines[i - 1]!.y - lines[i]!.y;
+  for (let i = 1; i < ys.length; i++) {
+    const g = ys[i - 1]! - ys[i]!;
     if (g > 1) gaps.push(g);
   }
   const medGap = median(gaps);
-  const paras: Line[][] = [];
-  for (const ln of lines) {
-    const group = paras[paras.length - 1];
-    const prev = group?.[group.length - 1];
-    if (!group || !prev) {
-      paras.push([ln]);
-      continue;
+
+  const blocks: Block[] = [];
+  const ordered = segs.slice().sort((a, b) => b.y - a.y || a.minX - b.minX);
+  for (const seg of ordered) {
+    const spacing = medGap > 0 ? medGap : seg.size * 1.2;
+    let best: Block | null = null;
+    let bestGap = Infinity;
+    for (const b of blocks) {
+      const vgap = b.lastY - seg.y;
+      if (vgap <= 0 || vgap > spacing * 1.6) continue; // not the immediately following line
+      if (Math.abs(b.lastSize - seg.size) > b.lastSize * 0.15) continue; // size change = new block
+      const overlap = Math.min(seg.maxX, b.right) - Math.max(seg.minX, b.left);
+      const minW = Math.min(seg.maxX - seg.minX, b.right - b.left) || 1;
+      const aligned = overlap > minW * 0.3 || Math.abs(seg.minX - b.left) <= seg.size;
+      if (!aligned) continue;
+      // a first-line indent inside an otherwise left-flush block starts a new paragraph
+      const leftFlush = b.lines.every((l) => Math.abs(l.minX - b.left) <= seg.size);
+      if (leftFlush && seg.minX > b.left + seg.size * 1.2) continue;
+      if (vgap < bestGap) {
+        best = b;
+        bestGap = vgap;
+      }
     }
-    const gap = prev.y - ln.y;
-    const spacing = medGap > 0 ? medGap : prev.size * 1.2;
-    const sizeClose = Math.abs(prev.size - ln.size) <= prev.size * 0.3;
-    const groupLeft = Math.min(...group.map((l) => l.minX));
-    const gapBreak = gap > spacing * 1.5;
-    const indentBreak = ln.minX > groupLeft + prev.size * 0.9;
-    if (gap > 0 && sizeClose && !gapBreak && !indentBreak) group.push(ln);
-    else paras.push([ln]);
+    if (best) {
+      best.lines.push(seg);
+      best.left = Math.min(best.left, seg.minX);
+      best.right = Math.max(best.right, seg.maxX);
+      best.lastY = seg.y;
+      best.lastSize = seg.size;
+    } else {
+      blocks.push({ lines: [seg], left: seg.minX, right: seg.maxX, lastY: seg.y, lastSize: seg.size });
+    }
   }
-  return paras;
+  return blocks.map((b) => b.lines);
 }
 
 function detectAlign(lines: Line[], boxX: number, boxRight: number, pageW: number): Align {
