@@ -248,3 +248,151 @@ const strToHex = (s) => {
         h += s.charCodeAt(i).toString(16).padStart(2, "0");
     return h;
 };
+/**
+ * Lay out every shown glyph with its user-space position and advance, using the per-font
+ * advance widths. This resolves glyph positions inside a single big TJ (the common case),
+ * which is what lets each glyph be anchored to the edited text and re-emitted on its own.
+ */
+export function layoutGlyphs(content, metricsOf) {
+    const toks = tokenizeContentStream(content);
+    const glyphs = [];
+    let ctm = [1, 0, 0, 1, 0, 0];
+    const stack = [];
+    let tm = [1, 0, 0, 1, 0, 0];
+    let tlm = [1, 0, 0, 1, 0, 0];
+    let leading = 0;
+    let fontRes = "";
+    let fontSize = 0;
+    let tc = 0; // char spacing
+    let tw = 0; // word spacing
+    let th = 1; // horizontal scale (Tz/100)
+    let operands = [];
+    const nums = () => operands.filter((t) => t.t === "num").map((t) => t.v);
+    const showElements = (els) => {
+        const fm = metricsOf(fontRes);
+        if (!fm)
+            return;
+        const bpc = fm.bytesPerCode;
+        for (const el of els) {
+            if (el.t === "num") {
+                // TJ kerning: shift left by num/1000 * size (in text space), scaled by th
+                const tx = (-el.v / 1000) * fontSize * th;
+                tm = mul([1, 0, 0, 1, tx, 0], tm);
+                continue;
+            }
+            const hex = el.t === "hex" ? el.v : strToHex(el.v);
+            for (let i = 0; i + bpc * 2 <= hex.length; i += bpc * 2) {
+                const codeHex = hex.slice(i, i + bpc * 2);
+                const code = parseInt(codeHex, 16);
+                const M = mul(tm, ctm);
+                const size = fontSize * Math.hypot(M[2], M[3]);
+                const w0 = fm.width(code); // glyph-space (1000em)
+                const isSpace = bpc === 1 && code === 32;
+                const tx = ((w0 / 1000) * fontSize + tc + (isSpace ? tw : 0)) * th;
+                const widthUser = tx * Math.hypot(M[0], M[1]);
+                glyphs.push({ fontRes, code, hex: codeHex, x: M[4], y: M[5], width: widthUser, size });
+                tm = mul([1, 0, 0, 1, tx, 0], tm);
+            }
+        }
+    };
+    let arr = null;
+    for (const tk of toks) {
+        if (tk.t !== "op") {
+            if (arr)
+                arr.push(tk);
+            else
+                operands.push(tk);
+            continue;
+        }
+        const o = tk.v;
+        if (o === "[") {
+            arr = [];
+            continue;
+        }
+        if (o === "]") {
+            operands.push({ t: "op", v: "__arr__" }); // marker; elements live in `arr`
+            continue;
+        }
+        const a = nums();
+        switch (o) {
+            case "q":
+                stack.push(ctm.slice());
+                break;
+            case "Q":
+                ctm = stack.pop() ?? ctm;
+                break;
+            case "cm":
+                if (a.length >= 6)
+                    ctm = mul([a[0], a[1], a[2], a[3], a[4], a[5]], ctm);
+                break;
+            case "BT":
+                tm = [1, 0, 0, 1, 0, 0];
+                tlm = [1, 0, 0, 1, 0, 0];
+                break;
+            case "Tf": {
+                const nm = operands.filter((t) => t.t === "name").pop();
+                if (nm)
+                    fontRes = nm.v;
+                if (a.length)
+                    fontSize = a[a.length - 1];
+                break;
+            }
+            case "Tc":
+                if (a.length)
+                    tc = a[a.length - 1];
+                break;
+            case "Tw":
+                if (a.length)
+                    tw = a[a.length - 1];
+                break;
+            case "Tz":
+                if (a.length)
+                    th = a[a.length - 1] / 100;
+                break;
+            case "TL":
+                if (a.length)
+                    leading = a[a.length - 1];
+                break;
+            case "Tm":
+                if (a.length >= 6) {
+                    tm = [a[0], a[1], a[2], a[3], a[4], a[5]];
+                    tlm = tm.slice();
+                }
+                break;
+            case "Td":
+                if (a.length >= 2) {
+                    tlm = mul([1, 0, 0, 1, a[0], a[1]], tlm);
+                    tm = tlm.slice();
+                }
+                break;
+            case "TD":
+                if (a.length >= 2) {
+                    leading = -a[1];
+                    tlm = mul([1, 0, 0, 1, a[0], a[1]], tlm);
+                    tm = tlm.slice();
+                }
+                break;
+            case "T*":
+                tlm = mul([1, 0, 0, 1, 0, -leading], tlm);
+                tm = tlm.slice();
+                break;
+            case "'":
+            case '"':
+            case "Tj":
+            case "TJ": {
+                if (o === "'" || o === '"') {
+                    tlm = mul([1, 0, 0, 1, 0, -leading], tlm);
+                    tm = tlm.slice();
+                }
+                const els = arr ?? operands.filter((t) => t.t === "hex" || t.t === "str");
+                showElements(els);
+                break;
+            }
+            default:
+                break;
+        }
+        operands = [];
+        arr = null;
+    }
+    return glyphs;
+}

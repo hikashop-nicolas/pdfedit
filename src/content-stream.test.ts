@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractTextRuns, tokenizeContentStream } from "./content-stream";
+import { extractTextRuns, layoutGlyphs, tokenizeContentStream, type FontMetrics } from "./content-stream";
 
 describe("tokenizeContentStream", () => {
   it("tokenizes numbers, names, hex/literal strings and operators", () => {
@@ -52,5 +52,33 @@ describe("extractTextRuns", () => {
       [0, 672, "63"], // c (T* uses leading 14 from TD)
     ]);
     expect(runs.every((r) => r.fontRes === "F2")).toBe(true);
+  });
+});
+
+describe("layoutGlyphs", () => {
+  const simple: FontMetrics = { bytesPerCode: 1, width: () => 500 };
+  const cid: FontMetrics = { bytesPerCode: 2, width: () => 1000 };
+  const metrics = (r: string) => (r === "C" ? cid : simple);
+
+  it("places simple-font glyphs left to right using advance widths", () => {
+    const g = layoutGlyphs("BT /F1 10 Tf 1 0 0 1 100 200 Tm (AB) Tj ET", metrics);
+    expect(g.map((x) => [x.fontRes, x.hex, x.x, x.y, x.width, x.size])).toEqual([
+      ["F1", "41", 100, 200, 5, 10], // A: advance 500/1000*10 = 5
+      ["F1", "42", 105, 200, 5, 10], // B starts at 105
+    ]);
+  });
+
+  it("splits a composite font's hex into 2-byte codes", () => {
+    const g = layoutGlyphs("BT /C 10 Tf 1 0 0 1 0 0 Tm <00050006> Tj ET", metrics);
+    expect(g.map((x) => [x.hex, x.code, x.x])).toEqual([
+      ["0005", 5, 0], // advance 1000/1000*10 = 10
+      ["0006", 6, 10],
+    ]);
+  });
+
+  it("applies TJ kerning between glyphs", () => {
+    const g = layoutGlyphs("BT /C 10 Tf 1 0 0 1 0 0 Tm [<0005>100<0006>] TJ ET", metrics);
+    // 0005 at 0 (advance 10), kern 100 -> -1, 0006 at 10-1 = 9
+    expect(g.map((x) => x.x)).toEqual([0, 9]);
   });
 });
