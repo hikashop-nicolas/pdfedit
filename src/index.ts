@@ -213,6 +213,45 @@ const normalizePua = (s: string): string => {
   return out;
 };
 
+// Re-encode normalized text back to the symbol font's Private Use Area codes (the inverse
+// of normalizePua) so a reused embedded symbol font finds its glyphs on export.
+const toPua = (s: string): string => {
+  let out = "";
+  for (const ch of s) {
+    const cp = ch.charCodeAt(0);
+    out += cp >= 0x20 && cp <= 0xff ? String.fromCharCode(0xf000 + cp) : ch;
+  }
+  return out;
+};
+
+// Plausible advance width of a text item. Some subset fonts report garbage widths (many
+// times the page width); fall back to an estimate so one bad item can't distort layout.
+const itemWidth = (it: RunItem): number => {
+  const plausible = it.str.length * it.size * 1.5 + it.size;
+  return it.w > 0 && it.w <= plausible ? it.w : it.str.length * it.size * 0.5;
+};
+
+// Whether to insert a space between two items: a positional gap (adjacent label/value with
+// no space char), or a strong overlap (distinct text pieces laid over each other), but not
+// when whitespace already borders the seam.
+const wantSpace = (gap: number, size: number, before: string, next: string): boolean =>
+  (gap > size * 0.2 || gap < -size * 0.5) && before !== "" && !/\s$/.test(before) && !/^\s/.test(next);
+
+// Join items on one line, inserting spaces per wantSpace (PDFs often emit adjacent runs,
+// e.g. a label and a value, with no space char between them).
+const joinItems = (items: RunItem[]): string => {
+  let text = "";
+  let prevEnd = -Infinity;
+  for (const it of items) {
+    if (prevEnd > -Infinity && wantSpace(it.x - prevEnd, it.size, text, it.str)) text += " ";
+    text += it.str;
+    prevEnd = it.x + itemWidth(it);
+  }
+  return text;
+};
+
+const colorDist = (a: RGB, b: RGB): number => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
+
 let colorProbe: HTMLDivElement | null = null;
 function cssColorToRgb(str: string, fallback: RGB): RGB {
   if (!str) return fallback;
@@ -346,13 +385,7 @@ function buildLines(items: RunItem[]): Line[] {
       curSize = it.size;
     }
   }
-  // 2) split each baseline into segments at large horizontal gaps. Some subset fonts
-  // report garbage glyph widths (advances many times the page width); cap to a plausible
-  // bound so one bad item can't inflate a segment's extent and swallow neighbours.
-  const widthOf = (it: RunItem) => {
-    const plausible = it.str.length * it.size * 1.5 + it.size;
-    return it.w > 0 && it.w <= plausible ? it.w : it.str.length * it.size * 0.5;
-  };
+  // 2) split each baseline into segments at large horizontal gaps (a column boundary)
   const lines: Line[] = [];
   for (const base of baselines) {
     base.sort((a, b) => a.x - b.x);
@@ -364,9 +397,9 @@ function buildLines(items: RunItem[]): Line[] {
         items: seg,
         y: seg[0]!.y,
         minX: seg[0]!.x,
-        maxX: Math.max(...seg.map((i) => i.x + widthOf(i))),
+        maxX: Math.max(...seg.map((i) => i.x + itemWidth(i))),
         size: Math.max(...seg.map((i) => i.size)),
-        text: seg.map((i) => i.str).join(""),
+        text: joinItems(seg),
       });
       seg = [];
     };
@@ -374,7 +407,7 @@ function buildLines(items: RunItem[]): Line[] {
       const em = Math.max(it.size, seg[seg.length - 1]?.size ?? it.size);
       if (seg.length && it.x - segEnd > em * COL_GAP_EM) flush();
       seg.push(it);
-      segEnd = Math.max(segEnd, it.x + widthOf(it));
+      segEnd = Math.max(segEnd, it.x + itemWidth(it));
     }
     flush();
   }
@@ -391,8 +424,9 @@ interface Block {
   right: number;
   lastY: number;
   lastSize: number;
+  bg: RGB | null;
 }
-function buildParagraphs(items: RunItem[]): Line[][] {
+function buildParagraphs(items: RunItem[], bgOf?: (ln: Line) => RGB | null): Line[][] {
   const segs = buildLines(items);
   if (!segs.length) return [];
   // line-spacing estimate from distinct baselines
@@ -403,17 +437,21 @@ function buildParagraphs(items: RunItem[]): Line[][] {
     if (g > 1) gaps.push(g);
   }
   const medGap = median(gaps);
+  const bgMap = bgOf ? new Map<Line, RGB | null>(segs.map((s) => [s, bgOf(s)])) : null;
 
   const blocks: Block[] = [];
   const ordered = segs.slice().sort((a, b) => b.y - a.y || a.minX - b.minX);
   for (const seg of ordered) {
     const spacing = medGap > 0 ? medGap : seg.size * 1.2;
+    const segBg = bgMap?.get(seg) ?? null;
     let best: Block | null = null;
     let bestGap = Infinity;
     for (const b of blocks) {
       const vgap = b.lastY - seg.y;
       if (vgap <= 0 || vgap > spacing * 1.6) continue; // not the immediately following line
       if (Math.abs(b.lastSize - seg.size) > b.lastSize * 0.15) continue; // size change = new block
+      // a clear background change separates blocks (e.g. a shaded table header above a row)
+      if (segBg && b.bg && colorDist(segBg, b.bg) > 38) continue;
       const overlap = Math.min(seg.maxX, b.right) - Math.max(seg.minX, b.left);
       const minW = Math.min(seg.maxX - seg.minX, b.right - b.left) || 1;
       const aligned = overlap > minW * 0.3 || Math.abs(seg.minX - b.left) <= seg.size;
@@ -433,7 +471,7 @@ function buildParagraphs(items: RunItem[]): Line[][] {
       best.lastY = seg.y;
       best.lastSize = seg.size;
     } else {
-      blocks.push({ lines: [seg], left: seg.minX, right: seg.maxX, lastY: seg.y, lastSize: seg.size });
+      blocks.push({ lines: [seg], left: seg.minX, right: seg.maxX, lastY: seg.y, lastSize: seg.size, bg: segBg });
     }
   }
   return blocks.map((b) => b.lines);
@@ -543,6 +581,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   // font while editing). Keyed by pdf.js loadedName (unique per font in the document).
   const uid = (instanceSeq++).toString(36);
   const fontRecs = new Map<string, FontRec>();
+  const puaFonts = new Set<string>(); // fonts whose text was Private-Use-Area encoded (symbol cmap)
   const faces = new Map<string, FontFace>();
   const registerFace = (key: string, data: Uint8Array): string | undefined => {
     const name = `pf_${uid}_${key.replace(/[^a-zA-Z0-9_]/g, "")}`;
@@ -571,7 +610,16 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     let cssName: string | undefined;
     try {
       if (page.commonObjs.has(fontName)) {
-        const f = page.commonObjs.get(fontName) as { name?: string; type?: string; bold?: boolean; italic?: boolean; black?: boolean; data?: Uint8Array | ArrayBuffer };
+        const f = page.commonObjs.get(fontName) as {
+          name?: string;
+          type?: string;
+          bold?: boolean;
+          italic?: boolean;
+          black?: boolean;
+          data?: Uint8Array | ArrayBuffer;
+          isSerifFont?: boolean;
+          isMonospace?: boolean;
+        };
         const nm = String(f?.name ?? "");
         baseName = nm.replace(/^[A-Z]{6}\+/, "");
         isType3 = f?.type === "Type3";
@@ -580,6 +628,12 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         bold = f?.bold === true || f?.black === true || /bold|black|semibold|heavy/i.test(nm);
         italic = f?.italic === true || /italic|oblique/i.test(nm);
         family = familyOf(nm);
+        // Subset names like "CIDFont+F2" carry no family hint; trust the descriptor flags so
+        // a substitute (when the embedded program can't be reused) matches serif vs sans.
+        const hasSansHint = /sans|arial|helvetica|verdana|tahoma|segoe|calibri|roboto|system-ui|-apple-system/i.test(nm);
+        if (family === "sans" && !hasSansHint) {
+          family = f?.isMonospace ? "mono" : f?.isSerifFont ? "serif" : "sans";
+        }
         if (f?.data) {
           const d = f.data instanceof Uint8Array ? f.data : new Uint8Array(f.data);
           if (d.length) {
@@ -1092,7 +1146,9 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       for (const item of content.items) {
         if (!("str" in item) || item.str === "") continue;
         const t = item.transform as number[];
-        allItems.push({ str: normalizePua(item.str), x: t[4]!, y: t[5]!, w: item.width ?? 0, size: Math.hypot(t[2]!, t[3]!) || 10, fontName: item.fontName });
+        const norm = normalizePua(item.str);
+        if (norm !== item.str) puaFonts.add(item.fontName); // symbol font: remember for export
+        allItems.push({ str: norm, x: t[4]!, y: t[5]!, w: item.width ?? 0, size: Math.hypot(t[2]!, t[3]!) || 10, fontName: item.fontName });
       }
       // Drop hidden text layers: some PDFs (e.g. Google Docs / OCR exports) draw the
       // visible glyphs with an embedded/Type3 font and overlay an invisible copy in a
@@ -1111,7 +1167,25 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         .map((b) => b.it);
       const perItemColor = !!cctx && items.length <= 800;
 
-      for (const lines of buildParagraphs(items)) {
+      // Sample the background under a line so the grouper can split blocks that differ in
+      // fill (e.g. a shaded table header above a white data cell), even when adjacent.
+      const bgOf = cctx
+        ? (ln: Line): RGB | null => {
+            const a = viewport.convertToViewportPoint(ln.minX, ln.y + ln.size * 0.85);
+            const b = viewport.convertToViewportPoint(ln.maxX, ln.y - ln.size * 0.3);
+            const left = Math.min(a[0]!, b[0]!);
+            const top = Math.min(a[1]!, b[1]!);
+            const w = Math.max(Math.abs(b[0]! - a[0]!), 2);
+            const h = Math.max(Math.abs(b[1]! - a[1]!), 4);
+            try {
+              return sampleColors(cctx, left, top, w, h).bg;
+            } catch {
+              return null;
+            }
+          }
+        : undefined;
+
+      for (const lines of buildParagraphs(items, bgOf)) {
         const first = lines[0]!;
         if (lines.every((l) => l.text.trim() === "")) continue;
         const boxX = Math.min(...lines.map((l) => l.minX));
@@ -1158,6 +1232,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         };
         const lastLi = lines.length - 1;
         lines.forEach((ln, li) => {
+          let prevEnd = -Infinity; // reset per line; inter-line spacing handled below
           for (const it of ln.items) {
             if (it.str === "") continue;
             const rec = getFontRec(page, it.fontName);
@@ -1180,7 +1255,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
                 rec.inkN = (rec.inkN ?? 0) + 1;
               } else curColor = fgHex;
             }
+            // Insert a space for a positional gap or strong overlap (adjacent label/value).
+            if (prevEnd > -Infinity && wantSpace(it.x - prevEnd, it.size, curText, it.str)) curText += " ";
             curText += it.str;
+            prevEnd = it.x + itemWidth(it);
           }
           if (li !== lastLi) curText += " ";
         });
@@ -1350,11 +1428,16 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           }
         }
         const emb = embKey ? await getEmbedded(embKey) : null;
-        if (space) return { font: emb ?? std, text: " ", faux: false };
-        if (emb && covers(emb, part)) {
-          // Faux-bold when the run is bold but the reused font isn't an actual bold font.
-          const embBold = !!(embKey && fontRecs.get(embKey)?.bold);
-          return { font: emb, text: part, faux: run.bold && !embBold };
+        const embPua = !!(embKey && puaFonts.has(embKey));
+        // A symbol font has glyphs at U+F0xx, not at ASCII; re-encode the text to reuse it.
+        if (space) return { font: emb && !embPua ? emb : std, text: " ", faux: false };
+        if (emb) {
+          const reencoded = embPua ? toPua(part) : part;
+          if (covers(emb, reencoded)) {
+            // Faux-bold when the run is bold but the reused font isn't an actual bold font.
+            const embBold = !!(embKey && fontRecs.get(embKey)?.bold);
+            return { font: emb, text: reencoded, faux: run.bold && !embBold };
+          }
         }
         return { font: std, text: sanitizeStd(part), faux: false };
       };
