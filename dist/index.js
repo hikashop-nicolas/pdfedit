@@ -1,6 +1,9 @@
 import * as pdfjsLib from "pdfjs-dist";
 import fontkit from "@pdf-lib/fontkit";
-import { PDFArray, PDFDocument, PDFName, PDFString, StandardFonts, rgb } from "pdf-lib";
+import { beginText, endText, PDFArray, PDFDocument, PDFHexString, PDFName, PDFString, popGraphicsState, pushGraphicsState, setFillingRgbColor, setFontAndSize, setTextMatrix, showText, StandardFonts, rgb, } from "pdf-lib";
+import {} from "./content-stream";
+import { planEditedBlock } from "./glyph-edit";
+import { pageGlyphs } from "./pdf-glyphs";
 const ICON = {
     left: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M2 6.8h8M2 10.1h11M2 13.4h6"/></svg>`,
     center: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M4 6.8h8M3 10.1h10M5 13.4h6"/></svg>`,
@@ -138,6 +141,23 @@ const joinItems = (items) => {
     return text;
 };
 const colorDist = (a, b) => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
+// Current text of an edited block, with a "\n" for each <br> (matches how anchorText was
+// captured at render), for diffing against the original on export.
+const blockText = (el) => {
+    let out = "";
+    const walk = (node) => {
+        for (const ch of Array.from(node.childNodes)) {
+            if (ch.nodeType === 3)
+                out += ch.textContent ?? "";
+            else if (ch.nodeName === "BR")
+                out += "\n";
+            else if (ch.nodeType === 1)
+                walk(ch);
+        }
+    };
+    walk(el);
+    return out;
+};
 let colorProbe = null;
 function cssColorToRgb(str, fallback) {
     if (!str)
@@ -1061,6 +1081,23 @@ export function createPdfEditor(container, bytes, options = {}) {
     }
     void (async () => {
         const doc = await pdfjsLib.getDocument({ data: bytes.slice(), fontExtraProperties: true }).promise;
+        // Lazily parsed (pdf-lib) copy used only to recover original glyph codes for blocks whose
+        // fonts have no usable Unicode. Loaded on first need so normal PDFs pay nothing.
+        let glyphPdf = null;
+        let glyphPdfFailed = false;
+        const glyphsForPage = async (pageIndex) => {
+            if (glyphPdfFailed)
+                return [];
+            try {
+                if (!glyphPdf)
+                    glyphPdf = await PDFDocument.load(bytes.slice());
+                return pageGlyphs(glyphPdf, pageIndex);
+            }
+            catch {
+                glyphPdfFailed = true;
+                return [];
+            }
+        };
         for (let p = 1; p <= doc.numPages && !destroyed; p++) {
             const page = await doc.getPage(p);
             const viewport = page.getViewport({ scale });
@@ -1107,6 +1144,28 @@ export function createPdfEditor(container, bytes, options = {}) {
             })
                 .map((b) => b.it);
             const perItemColor = !!cctx && items.length <= 800;
+            // Anchor each item's characters to their original glyphs (font resource + byte code),
+            // but only for pages that use a font with no usable Unicode (where editing would
+            // otherwise lose the glyph). Normal PDFs skip this entirely.
+            const pageHasFragileFont = items.some((it) => puaFonts.has(it.fontName));
+            if (pageHasFragileFont) {
+                const placed = await glyphsForPage(p - 1);
+                for (const it of items) {
+                    const chars = [...it.str];
+                    if (!chars.length)
+                        continue;
+                    // Assign a glyph to this item when its centre falls in the item's x-span, so a
+                    // neighbouring glyph at the seam is not double-counted (matters for 1-glyph items).
+                    const here = placed
+                        .filter((g) => Math.abs(g.y - it.y) <= it.size * 0.4 && g.x + g.width / 2 >= it.x && g.x + g.width / 2 <= it.x + it.w)
+                        .sort((a, b) => a.x - b.x);
+                    if (here.length !== chars.length)
+                        continue; // mismatched mapping: leave un-anchored
+                    const fg = cctx ? sampleRunStats(cctx, viewport, it.x, it.y, it.w, it.size).fg : { r: 0, g: 0, b: 0 };
+                    const color = { r: fg.r / 255, g: fg.g / 255, b: fg.b / 255 };
+                    it.anchors = here.map((g) => ({ fontRes: g.fontRes, hex: g.hex, width: g.width, size: g.size, color }));
+                }
+            }
             // Sample the background under a line so the grouper can split blocks that differ in
             // fill (e.g. a shaded table header above a white data cell), even when adjacent.
             const bgOf = cctx
@@ -1164,6 +1223,11 @@ export function createPdfEditor(container, bytes, options = {}) {
                 let curSize = size;
                 let curColor = fgHex;
                 let curText = "";
+                // Built in lockstep with the block text (curText pieces + "\n" per <br>) so each
+                // character keeps its original-glyph anchor for glyph-preserving export.
+                let anchorText = "";
+                const paraAnchors = [];
+                let blockHasFragile = false;
                 const fontCount = new Map(); // chars per font, to find the dominant one
                 const flushSpan = () => {
                     if (!curText)
@@ -1196,9 +1260,13 @@ export function createPdfEditor(container, bytes, options = {}) {
                             flushSpan(); // overlapping items are stacked text (separate lines), not one line
                             html += "<br>";
                             curKey = "";
+                            anchorText += "\n";
+                            paraAnchors.push(null);
                         }
                         else if (prevEnd > -Infinity && gap > it.size * 0.2 && !/\s$/.test(curText) && !/^\s/.test(it.str)) {
                             curText += " "; // positional gap with no whitespace (adjacent label/value)
+                            anchorText += " ";
+                            paraAnchors.push(null);
                         }
                         // Key by font identity (not just detected style) so a differently-fonted run,
                         // e.g. a bold subset whose name omits "Bold", still gets its own span and its
@@ -1220,14 +1288,25 @@ export function createPdfEditor(container, bytes, options = {}) {
                                 curColor = fgHex;
                         }
                         curText += it.str;
+                        if (puaFonts.has(it.fontName))
+                            blockHasFragile = true;
+                        const chars = [...it.str];
+                        for (let k = 0; k < chars.length; k++) {
+                            anchorText += chars[k];
+                            paraAnchors.push(it.anchors?.[k] ?? null);
+                        }
                         prevEnd = it.x + itemWidth(it);
                     }
                     if (li !== lastLi) {
                         if (flowing) {
                             curText += " "; // soft wrap: reflow as one paragraph
+                            anchorText += " ";
+                            paraAnchors.push(null);
                         }
                         else {
                             flushSpan(); // hard break: preserve the line return
+                            anchorText += "\n";
+                            paraAnchors.push(null);
                             html += "<br>";
                         }
                     }
@@ -1282,6 +1361,11 @@ export function createPdfEditor(container, bytes, options = {}) {
                     dirty: false,
                     el,
                     viewport,
+                    anchorText,
+                    anchors: paraAnchors,
+                    // Re-emit original glyphs on export when this block uses fonts with no usable
+                    // Unicode and the anchors line up with the captured text.
+                    glyphPreserve: blockHasFragile && paraAnchors.length === anchorText.length && paraAnchors.some((a) => a !== null),
                 };
                 el.addEventListener("focus", () => {
                     activePara = para;
@@ -1428,6 +1512,13 @@ export function createPdfEditor(container, bytes, options = {}) {
                 // Fallback for text typed directly in the block (outside any span): the paragraph's
                 // dominant font, so stray text exports in the document font, not a generic one.
                 const baseRec = fontRecs.get(pp.baseFontKey);
+                // Glyph-preserving path: blocks whose fonts have no usable Unicode re-emit their
+                // original glyphs (font resource + byte code) for unchanged text, substituting only
+                // genuinely new characters. Everything else uses the well-tested substitute path.
+                if (pp.glyphPreserve) {
+                    await drawGlyphPreserving(page, pp, baseRec, getStd);
+                    continue;
+                }
                 const base = {
                     bold: baseRec ? baseRec.bold || !!baseRec.synthBold : false,
                     italic: baseRec ? baseRec.italic : false,
@@ -1467,6 +1558,36 @@ export function createPdfEditor(container, bytes, options = {}) {
             wrap.remove();
         },
     };
+    // Re-emit a block's original glyphs for unchanged text, substituting only new characters.
+    async function drawGlyphPreserving(page, pp, baseRec, getStd) {
+        const bold = baseRec ? baseRec.bold || !!baseRec.synthBold : false;
+        const italic = baseRec ? baseRec.italic : false;
+        const std = await getStd(standardFont(pp.family, bold, italic));
+        const measure = (ch, sz) => {
+            try {
+                return std.widthOfTextAtSize(ch, sz);
+            }
+            catch {
+                return sz * 0.5;
+            }
+        };
+        const edited = blockText(pp.el);
+        const segs = planEditedBlock(pp.anchorText, pp.anchors, edited, { x: pp.x, firstBaseline: pp.firstBaseline, lineHeight: pp.lineHeight, width: pp.w, align: pp.align, size: pp.size }, measure, pp.color);
+        for (const s of segs) {
+            if (s.kind === "glyph") {
+                // /<fontRes> <size> Tf  1 0 0 1 x y Tm  <codes> Tj  — original glyphs, verbatim.
+                page.pushOperators(pushGraphicsState(), beginText(), setFillingRgbColor(s.color.r, s.color.g, s.color.b), setFontAndSize(s.fontRes, s.size), setTextMatrix(1, 0, 0, 1, s.x, s.y), showText(PDFHexString.of(s.hex)), endText(), popGraphicsState());
+            }
+            else if (s.text.trim() !== "") {
+                try {
+                    page.drawText(s.text, { x: s.x, y: s.y, size: s.size, font: std, color: rgb(s.color.r, s.color.g, s.color.b) });
+                }
+                catch {
+                    /* glyph not encodable in the substitute font */
+                }
+            }
+        }
+    }
     async function drawRuns(pdf, page, pp, runs, resolveToken) {
         // Tokenize runs into words/spaces, resolving a font per token.
         const toks = [];
