@@ -1219,6 +1219,22 @@ export function createPdfEditor(container, bytes, options = {}) {
                     const chars = [...it.str];
                     if (!chars.length)
                         continue;
+                    // Invisible (white / render-mode-3) text is drawn but not shown. Decide this from
+                    // the glyph at the item's origin (robust even when the run overlaps visible text,
+                    // which would otherwise spoil the per-character count match below).
+                    let originGlyph = null;
+                    let originDist = Infinity;
+                    for (const g of placed) {
+                        const d = Math.abs(g.x - it.x) + Math.abs(g.y - it.y);
+                        if (d < originDist) {
+                            originDist = d;
+                            originGlyph = g;
+                        }
+                    }
+                    if (originGlyph && originDist < 2 && !originGlyph.visible) {
+                        it.invisible = true; // omit invisible text from the overlay (it stays in the file)
+                        continue;
+                    }
                     // Assign a glyph to this item when its centre falls in the item's x-span, so a
                     // neighbouring glyph at the seam is not double-counted (matters for 1-glyph items).
                     const here = placed
@@ -1226,10 +1242,6 @@ export function createPdfEditor(container, bytes, options = {}) {
                         .sort((a, b) => a.x - b.x);
                     if (here.length !== chars.length)
                         continue; // mismatched mapping: leave un-anchored
-                    if (here.every((g) => !g.visible)) {
-                        it.invisible = true; // white/invisible text: drawn but not visible, omit from the overlay
-                        continue;
-                    }
                     const fg = cctx ? sampleRunStats(cctx, viewport, it.x, it.y, it.w, it.size).fg : { r: 0, g: 0, b: 0 };
                     const color = { r: fg.r / 255, g: fg.g / 255, b: fg.b / 255 };
                     it.anchors = here.map((g) => ({ fontRes: g.fontRes, hex: g.hex, width: g.width, size: g.size, color }));
