@@ -198,4 +198,25 @@ describe("pdfedit toolbar", () => {
       expect(marker!.top, "marker is on a lower line than the original").to.be.greaterThan(first!.top + 4);
     });
   });
+
+  it("restores an editing session from saved state (re-render pristine + replay edits)", () => {
+    openFixture();
+    // Append a marker to the first paragraph (keeps the original text too).
+    cy.get(".pdfedit-para").first().click().type("{moveToEnd} ZZSTATE");
+    // Snapshot the session, then destroy + recreate from that state (what history Restore does).
+    let saved: unknown;
+    cy.window().then((win) => {
+      saved = (win as unknown as { __pdfeditDemo: { getEditor: () => { getState: () => unknown } } }).__pdfeditDemo.getEditor().getState();
+    });
+    cy.window().then((win) => {
+      (win as unknown as { __pdfeditDemo: { restore: (s: unknown) => void } }).__pdfeditDemo.restore(saved);
+    });
+    cy.get(".pdfedit-para", { timeout: RENDER_TIMEOUT }).should("exist");
+    // The edit survived and the original text is present exactly once (no doubling, no loss).
+    cy.get("#editor").invoke("text").should((t) => {
+      expect(t, "edit replayed").to.contain("ZZSTATE");
+      expect(t, "original text preserved").to.contain("Premier");
+      expect((t.match(/Premier/g) || []).length, "no doubled text").to.eq(1);
+    });
+  });
 });

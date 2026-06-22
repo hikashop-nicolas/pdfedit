@@ -9,6 +9,24 @@ const editorEl = document.getElementById("editor") as HTMLElement;
 let editor: PdfEditor | null = null;
 let filename = "edited.pdf";
 
+// Dev-only hook so the e2e tests can exercise the session-state (getState/restore) API,
+// which the simple demo UI doesn't otherwise surface.
+(window as unknown as { __pdfeditDemo: unknown }).__pdfeditDemo = {
+  getEditor: () => editor,
+  restore: (state: unknown) => {
+    editor?.destroy();
+    editorEl.innerHTML = "";
+    editor = createPdfEditor(editorEl, (state as { original: Uint8Array }).original, {
+      workerSrc: workerUrl,
+      initialState: state as Parameters<typeof createPdfEditor>[2]["initialState"],
+      onChange: () => {
+        saveBtn.disabled = false;
+        statusEl.textContent = "edited";
+      },
+    });
+  },
+};
+
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files?.[0];
   if (!file) return;

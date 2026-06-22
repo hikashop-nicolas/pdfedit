@@ -827,44 +827,49 @@ export function createPdfEditor(container, bytes, options = {}) {
         });
     };
     // Add a new editable text box at a blank spot (double-clicked) on a page.
-    const addTextAt = (pageEl, viewport, pageIndex, clientX, clientY) => {
-        const rect = pageEl.getBoundingClientRect();
-        const vx = (clientX - rect.left) / displayZoom; // undo the CSS zoom -> canvas/viewport px
-        const vy = (clientY - rect.top) / displayZoom;
-        const [pdfX, pdfY] = viewport.convertToPdfPoint(vx, vy);
+    // Create an added text box at a PDF-space position. Used by the double-click handler and by
+    // session restore (which passes a saved width/size/style and content instead of defaults).
+    const createTextBox = (pageEl, viewport, pageIndex, o) => {
+        const [vx, vy] = viewport.convertToViewportPoint(o.pdfX, o.pdfY);
         const pageWidthPdf = viewport.width / scale;
-        const size = 12;
+        const size = o.size ?? 12;
+        const wPdf = o.wPdf ?? Math.max(60, pageWidthPdf - o.pdfX - 10);
+        const family = o.family ?? "sans";
+        const colorHex = o.colorHex ?? "#000";
         const lineHeight = size * 1.2;
         const el = document.createElement("div");
-        el.className = "pdfedit-para pdfedit-active";
+        el.className = o.focus ? "pdfedit-para pdfedit-active" : "pdfedit-para";
         el.contentEditable = "true";
         el.spellcheck = false;
+        if (o.html)
+            el.innerHTML = o.html;
         el.style.left = `${vx}px`;
         el.style.top = `${vy}px`;
-        el.style.width = `${Math.max(60, pageWidthPdf - pdfX - 10) * scale}px`;
+        el.style.width = `${wPdf * scale}px`;
         el.style.minHeight = `${size * scale}px`;
         el.style.fontSize = `${size * scale}px`;
         el.style.lineHeight = `${lineHeight * scale}px`;
-        el.style.fontFamily = cssFamily("sans");
-        el.style.color = "#000";
-        el.style.setProperty("--c", "#000");
+        el.style.fontFamily = cssFamily(family);
+        el.style.textAlign = o.align ?? "left";
+        el.style.color = colorHex;
+        el.style.setProperty("--c", colorHex);
         el.style.setProperty("--bg", "#ffffff");
         const para = {
             page: pageIndex,
-            x: pdfX,
-            w: Math.max(60, pageWidthPdf - pdfX - 10),
-            topY: pdfY,
-            bottomY: pdfY - lineHeight,
-            firstBaseline: pdfY - size * 0.8,
+            x: o.pdfX,
+            w: wPdf,
+            topY: o.pdfY,
+            bottomY: o.pdfY - lineHeight,
+            firstBaseline: o.pdfY - size * 0.8,
             lineHeight,
             size,
-            align: "left",
-            family: "sans",
+            align: o.align ?? "left",
+            family,
             baseFontKey: "",
-            color: { r: 0, g: 0, b: 0 },
+            color: cssColorToRgb(colorHex, { r: 0, g: 0, b: 0 }),
             bg: { r: 1, g: 1, b: 1 },
             origText: "",
-            dirty: false,
+            dirty: !!o.html, // restored content is already an edit
             el,
             viewport,
             anchorText: "",
@@ -875,7 +880,16 @@ export function createPdfEditor(container, bytes, options = {}) {
         wirePara(para);
         pageEl.appendChild(el);
         paragraphs.push(para);
-        el.focus();
+        if (o.focus)
+            el.focus();
+        return para;
+    };
+    const addTextAt = (pageEl, viewport, pageIndex, clientX, clientY) => {
+        const rect = pageEl.getBoundingClientRect();
+        const vx = (clientX - rect.left) / displayZoom; // undo the CSS zoom -> canvas/viewport px
+        const vy = (clientY - rect.top) / displayZoom;
+        const [pdfX, pdfY] = viewport.convertToPdfPoint(vx, vy);
+        createTextBox(pageEl, viewport, pageIndex, { pdfX, pdfY, focus: true });
     };
     const onSelChange = () => {
         const sel = document.getSelection();
@@ -1112,17 +1126,21 @@ export function createPdfEditor(container, bytes, options = {}) {
         const target = pageEls[0];
         if (!target)
             return;
-        const bytesImg = new Uint8Array(await file.arrayBuffer());
+        addImageBox(new Uint8Array(await file.arrayBuffer()), file.type, target, null, true);
+    }
+    // Build an image box (DOM + drag/resize/delete wiring). `place` restores a saved
+    // viewport-space position/size (render scale is constant per document); null uses defaults.
+    function addImageBox(bytesImg, mime, target, place, focus) {
         const box = document.createElement("div");
         box.className = "pdfedit-img";
         box.tabIndex = 0; // keyboard focusable
         box.setAttribute("role", "group");
         box.setAttribute("aria-label", "Inserted image. Arrow keys move it, plus and minus resize, Delete removes.");
-        box.style.left = "40px";
-        box.style.top = "40px";
-        box.style.width = "160px";
+        box.style.left = `${place ? place.leftPx : 40}px`;
+        box.style.top = `${place ? place.topPx : 40}px`;
+        box.style.width = `${place ? place.widthPx : 160}px`;
         const img = document.createElement("img");
-        img.src = URL.createObjectURL(new Blob([bytesImg], { type: file.type }));
+        img.src = URL.createObjectURL(new Blob([bytesImg], { type: mime }));
         img.draggable = false;
         img.alt = "";
         const handle = document.createElement("div");
@@ -1137,7 +1155,7 @@ export function createPdfEditor(container, bytes, options = {}) {
         del.setAttribute("aria-label", "Delete image");
         box.append(img, handle, del);
         target.el.appendChild(box);
-        const rec = { page: target.index, bytes: bytesImg, mime: file.type, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box };
+        const rec = { page: target.index, bytes: bytesImg, mime, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box };
         images.push(rec);
         img.addEventListener("load", () => updateImageRect(rec, target.viewport), { once: true });
         makeDraggable(box);
@@ -1206,7 +1224,8 @@ export function createPdfEditor(container, bytes, options = {}) {
                     break;
             }
         });
-        box.focus(); // newly inserted image gets focus so it can be positioned by keyboard
+        if (focus)
+            box.focus(); // newly inserted image gets focus so it can be positioned by keyboard
         change();
     }
     const pageViewportOf = (el) => pageEls.find((p) => p.el === el.parentElement)?.viewport;
@@ -1628,10 +1647,71 @@ export function createPdfEditor(container, bytes, options = {}) {
         }
         upgradeOverlayFonts();
         await applyDisplayFonts();
+        if (options.initialState)
+            applyState(options.initialState);
     })().catch((e) => console.error("[pdfedit] render failed", e));
+    // Replay a saved session onto the freshly rendered (pristine) pages: re-apply each edited
+    // paragraph's content by its render index, then re-add the user's text boxes and images.
+    function applyState(st) {
+        const rendered = paragraphs.filter((p) => !p.isNew);
+        for (const e of st.edits) {
+            const para = rendered[e.index];
+            if (para && para.page === e.page) {
+                para.el.innerHTML = e.html;
+                para.dirty = true;
+                para.el.classList.add("pdfedit-edited");
+            }
+        }
+        for (const b of st.boxes) {
+            const target = pageEls.find((pe) => pe.index === b.page);
+            if (target) {
+                createTextBox(target.el, target.viewport, b.page, {
+                    pdfX: b.xPdf, pdfY: b.yPdf, wPdf: b.wPdf, size: b.size,
+                    align: b.align, family: b.family, colorHex: b.colorHex, html: b.html,
+                });
+            }
+        }
+        for (const im of st.images) {
+            const target = pageEls.find((pe) => pe.index === im.page);
+            if (target)
+                addImageBox(im.bytes, im.mime, target, { leftPx: im.leftPx, topPx: im.topPx, widthPx: im.widthPx }, false);
+        }
+        if (st.edits.length || st.boxes.length || st.images.length)
+            options.onChange?.();
+    }
     return {
         isDirty() {
             return images.length > 0 || paragraphs.some((p) => p.dirty);
+        },
+        getState() {
+            const rendered = paragraphs.filter((p) => !p.isNew);
+            const edits = [];
+            rendered.forEach((p, index) => {
+                if (p.dirty)
+                    edits.push({ page: p.page, index, html: p.el.innerHTML });
+            });
+            const boxes = paragraphs
+                .filter((p) => p.isNew)
+                .map((p) => ({
+                page: p.page,
+                xPdf: p.x,
+                yPdf: p.topY,
+                wPdf: p.w,
+                size: p.size,
+                align: p.align,
+                family: p.family,
+                colorHex: rgb255ToHex({ r: p.color.r * 255, g: p.color.g * 255, b: p.color.b * 255 }),
+                html: p.el.innerHTML,
+            }));
+            const imgs = images.map((im) => ({
+                page: im.page,
+                bytes: im.bytes.slice(),
+                mime: im.mime,
+                leftPx: parseFloat(im.el.style.left) || 0,
+                topPx: parseFloat(im.el.style.top) || 0,
+                widthPx: im.el.offsetWidth || parseFloat(im.el.style.width) || 0,
+            }));
+            return { original: original.slice(), edits, boxes, images: imgs };
         },
         async getBytes() {
             const editedParas = paragraphs.filter((p) => p.dirty);
