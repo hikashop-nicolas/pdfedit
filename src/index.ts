@@ -282,15 +282,22 @@ const joinItems = (items: RunItem[]): string => {
 
 const colorDist = (a: RGB, b: RGB): number => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
 
-// Current text of an edited block, with a "\n" for each <br> (matches how anchorText was
-// captured at render), for diffing against the original on export.
+// Block-level tags a contenteditable can wrap a new line in (Chrome's Enter inserts <div>),
+// each of which starts a new visual line just like a <br>.
+const BLOCK_TAGS = new Set(["DIV", "P", "LI", "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE", "SECTION", "ARTICLE", "UL", "OL", "PRE"]);
+
+// Current text of an edited block, with a "\n" for each <br> and before each block element
+// (matches how anchorText was captured at render), for diffing against the original on export.
 const blockText = (el: HTMLElement): string => {
   let out = "";
   const walk = (node: Node): void => {
     for (const ch of Array.from(node.childNodes)) {
       if (ch.nodeType === 3) out += ch.textContent ?? "";
       else if (ch.nodeName === "BR") out += "\n";
-      else if (ch.nodeType === 1) walk(ch);
+      else if (ch.nodeType === 1) {
+        if (BLOCK_TAGS.has((ch as Element).tagName) && out !== "" && !out.endsWith("\n")) out += "\n";
+        walk(ch);
+      }
     }
   };
   walk(el);
@@ -561,6 +568,11 @@ function parseRuns(el: HTMLElement, base: { bold: boolean; italic: boolean; fami
       } else if (child instanceof HTMLElement) {
         const next = { ...st };
         const tag = child.tagName;
+        // A block element (e.g. Chrome's Enter <div>) starts a new line, like a <br>.
+        if (BLOCK_TAGS.has(tag)) {
+          const last = runs[runs.length - 1];
+          if (last && !last.brAfter) last.brAfter = true;
+        }
         if (child.dataset.font) next.fontKey = child.dataset.font;
         if (tag === "B" || tag === "STRONG") next.bold = true;
         if (tag === "I" || tag === "EM") next.italic = true;

@@ -101,4 +101,54 @@ describe("pdfedit toolbar", () => {
       expect(hl?.has("pdfedit-sel"), "saved selection is highlighted").to.eq(true);
     });
   });
+
+  it("keeps an Enter line break on its own line through export (Chrome inserts a <div>)", () => {
+    openFixture();
+    cy.window().then((win) => {
+      (win as unknown as { __exported: Uint8Array | null }).__exported = null;
+      const orig = win.URL.createObjectURL.bind(win.URL);
+      win.URL.createObjectURL = (b: Blob) => {
+        if (b instanceof win.Blob)
+          void b.arrayBuffer().then((ab) => ((win as unknown as { __exported: Uint8Array }).__exported = new Uint8Array(ab)));
+        return orig(b);
+      };
+    });
+    // Add a new line at the end of the first paragraph, then type a marker.
+    cy.get(".pdfedit-para").first().click().type("{moveToEnd}{enter}ZZNEWLINE");
+    cy.get("#save").click();
+    cy.window().its("__exported").should("exist");
+    cy.window().then((win) => {
+      const bytes = (win as unknown as { __exported: Uint8Array }).__exported;
+      const file = new win.File([bytes as BlobPart], "x.pdf", { type: "application/pdf" });
+      const dt = new win.DataTransfer();
+      dt.items.add(file);
+      const inp = win.document.getElementById("file") as HTMLInputElement;
+      inp.files = dt.files;
+      inp.dispatchEvent(new win.Event("change", { bubbles: true }));
+    });
+    cy.get(".pdfedit-para", { timeout: RENDER_TIMEOUT }).should("exist");
+    // In the reopened document the marker must sit BELOW the original first line.
+    cy.window().should((win) => {
+      const root = win.document.getElementById("editor")!;
+      const rectOf = (substr: string): DOMRect | null => {
+        const walker = win.document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const n = walker.currentNode as Text;
+          const i = (n.textContent ?? "").indexOf(substr);
+          if (i >= 0) {
+            const r = win.document.createRange();
+            r.setStart(n, i);
+            r.setEnd(n, i + substr.length);
+            return r.getBoundingClientRect();
+          }
+        }
+        return null;
+      };
+      const marker = rectOf("ZZNEWLINE");
+      const first = rectOf("Premier");
+      expect(marker, "marker survived export+reopen").to.not.eq(null);
+      expect(first, "original text present").to.not.eq(null);
+      expect(marker!.top, "marker is on a lower line than the original").to.be.greaterThan(first!.top + 4);
+    });
+  });
 });
