@@ -214,7 +214,9 @@ function injectStyles(): void {
     .pdfedit-toolbar input[type=range] { width:110px; cursor:pointer; accent-color:#6e7bff; }
     .pdfedit-root {
       flex:1; min-height:0; overflow:auto; box-sizing:border-box;
-      display:flex; flex-direction:column; align-items:center; gap:16px; padding:16px; background:#525659;
+      /* "safe center" keeps pages centred when they fit but falls back to start when a
+         zoomed page is wider than the viewport, so its left edge stays scrollable. */
+      display:flex; flex-direction:column; align-items:safe center; gap:16px; padding:16px; background:#525659;
     }
     .pdfedit-page { position:relative; background:#fff; box-shadow:0 2px 10px rgba(0,0,0,.45); }
     .pdfedit-page canvas { display:block; }
@@ -912,6 +914,41 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   wrap.append(toolbar.el, root);
   container.appendChild(wrap);
 
+  // Two-finger pinch zooms the document only (it drives the same zoom control as the
+  // slider), not the whole page. For touch devices such as the Android app.
+  let pinchDist0 = 0;
+  let pinchPct0 = 100;
+  const touchDist = (t: TouchList): number => {
+    const a = t[0]!;
+    const b = t[1]!;
+    return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  };
+  root.addEventListener(
+    "touchstart",
+    (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        pinchDist0 = touchDist(e.touches);
+        pinchPct0 = Math.round(displayZoom * 100);
+      }
+    },
+    { passive: true },
+  );
+  root.addEventListener(
+    "touchmove",
+    (e: TouchEvent) => {
+      if (e.touches.length === 2 && pinchDist0 > 0) {
+        e.preventDefault(); // handle the gesture ourselves; no page scroll/native zoom
+        toolbar.setZoom(pinchPct0 * (touchDist(e.touches) / pinchDist0));
+      }
+    },
+    { passive: false },
+  );
+  const endPinch = (): void => {
+    pinchDist0 = 0;
+  };
+  root.addEventListener("touchend", endPinch);
+  root.addEventListener("touchcancel", endPinch);
+
   // Track the selection inside a paragraph so toolbar controls that steal focus
   // (color/font/size pickers) can restore it before applying, and reflect the caret's
   // style back into the toolbar fields.
@@ -1271,7 +1308,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       if (o.family) font.value = o.family;
       if (o.colorHex) color.value = o.colorHex;
     };
-    return { el, update };
+    return { el, update, setZoom };
   }
 
   function setAlign(a: Align): void {
