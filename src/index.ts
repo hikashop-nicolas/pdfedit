@@ -304,6 +304,26 @@ const blockText = (el: HTMLElement): string => {
   return out;
 };
 
+// Persist the zoom level (a UI preference) across documents/sessions. Guarded so it is a
+// no-op where localStorage is unavailable (privacy mode / non-browser).
+const ZOOM_KEY = "pdfedit:zoom";
+const loadZoomPct = (): number => {
+  try {
+    const v = Number(localStorage.getItem(ZOOM_KEY));
+    if (Number.isFinite(v) && v >= 25 && v <= 400) return v;
+  } catch {
+    /* ignore */
+  }
+  return 100;
+};
+const saveZoomPct = (pct: number): void => {
+  try {
+    localStorage.setItem(ZOOM_KEY, String(pct));
+  } catch {
+    /* ignore */
+  }
+};
+
 let colorProbe: HTMLDivElement | null = null;
 function cssColorToRgb(str: string, fallback: RGB): RGB {
   if (!str) return fallback;
@@ -615,7 +635,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   const paragraphs: Paragraph[] = [];
   const images: ImageItem[] = [];
   const pageEls: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number }[] = [];
-  let displayZoom = 1; // visual zoom only; render scale and PDF coordinates are unchanged
+  let displayZoom = loadZoomPct() / 100; // visual zoom only (persisted); render scale + PDF coords unchanged
   const applyZoom = (z: number) => {
     displayZoom = z;
     for (const p of pageEls) p.el.style.zoom = String(z);
@@ -1072,14 +1092,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     zrange.min = "25";
     zrange.max = "400";
     zrange.step = "5";
-    zrange.value = "100";
+    zrange.value = String(Math.round(displayZoom * 100));
     zrange.title = "Zoom";
     zrange.setAttribute("aria-label", "Zoom level (percent)");
     const znum = document.createElement("input");
     znum.type = "number";
     znum.min = "25";
     znum.max = "400";
-    znum.value = "100";
+    znum.value = String(Math.round(displayZoom * 100));
     znum.title = "Zoom (%)";
     znum.setAttribute("aria-label", "Zoom percent");
     const zpct = document.createElement("span");
@@ -1089,6 +1109,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       zrange.value = String(p);
       znum.value = String(p);
       applyZoom(p / 100);
+      saveZoomPct(p);
     };
     zrange.addEventListener("input", () => setZoom(Number(zrange.value)));
     znum.addEventListener("change", () => setZoom(Number(znum.value)));

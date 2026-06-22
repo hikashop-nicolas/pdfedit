@@ -90,6 +90,18 @@ describe("pdfedit toolbar", () => {
     cy.get(".pdfedit-zoom input[type=number]").should("have.value", "50");
   });
 
+  it("remembers the zoom level across a reload (localStorage)", () => {
+    openFixture();
+    cy.get(".pdfedit-zoom input[type=number]").clear().type("175{enter}");
+    cy.get(".pdfedit-page").first().should(($p) => expect($p[0].style.zoom).to.eq("1.75"));
+    // reload the app and reopen the document: the zoom should be restored
+    cy.reload();
+    cy.get("#file").selectFile("cypress/fixtures/test.pdf", { force: true });
+    cy.get(".pdfedit-page", { timeout: RENDER_TIMEOUT }).should("have.length.greaterThan", 0);
+    cy.get(".pdfedit-zoom input[type=number]").should("have.value", "175");
+    cy.get(".pdfedit-page").first().should(($p) => expect($p[0].style.zoom).to.eq("1.75"));
+  });
+
   it("keeps the paragraph visible (active) while a toolbar control has focus", () => {
     openFixture();
     selectInFirstPara(0, 6);
