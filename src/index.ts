@@ -110,6 +110,8 @@ interface Paragraph {
   anchors: (Anchor | null)[];
   /** Re-emit original glyphs on export (set when the block uses fonts with no usable Unicode). */
   glyphPreserve: boolean;
+  /** Added by the user in blank space (no original content to cover / preserve). */
+  isNew?: boolean;
 }
 interface ImageItem {
   page: number;
@@ -894,6 +896,95 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     }
   };
 
+  // Attach the editing behaviour (active state, selection retention, dirty tracking) to a
+  // paragraph's element. Used for both extracted paragraphs and ones added in blank space.
+  const wirePara = (para: Paragraph): void => {
+    const el = para.el;
+    el.addEventListener("focus", () => {
+      activePara = para;
+      savedPara = para;
+      // Keep this paragraph active (border + visible overlay) even when focus moves to a
+      // toolbar control; the native selection shows while it is focused.
+      for (const p of paragraphs) p.el.classList.toggle("pdfedit-active", p === para);
+      clearHighlight();
+      toolbar.update({ sizePt: para.size, family: para.family });
+    });
+    el.addEventListener("blur", (e) => {
+      const to = (e as FocusEvent).relatedTarget as Node | null;
+      if (to && toolbar.el.contains(to)) {
+        showSavedHighlight();
+        return;
+      }
+      el.classList.remove("pdfedit-active");
+      clearHighlight();
+      // A box added in blank space but left empty is discarded (so a stray add leaves nothing).
+      if (para.isNew && (el.textContent ?? "").trim() === "") {
+        el.remove();
+        const i = paragraphs.indexOf(para);
+        if (i >= 0) paragraphs.splice(i, 1);
+        if (activePara === para) activePara = null;
+        if (savedPara === para) savedPara = null;
+      }
+    });
+    el.addEventListener("input", () => {
+      para.dirty = true;
+      el.classList.add("pdfedit-edited");
+      change();
+    });
+  };
+
+  // Add a new editable text box at a blank spot (double-clicked) on a page.
+  const addTextAt = (pageEl: HTMLElement, viewport: pdfjsLib.PageViewport, pageIndex: number, clientX: number, clientY: number): void => {
+    const rect = pageEl.getBoundingClientRect();
+    const vx = (clientX - rect.left) / displayZoom; // undo the CSS zoom -> canvas/viewport px
+    const vy = (clientY - rect.top) / displayZoom;
+    const [pdfX, pdfY] = viewport.convertToPdfPoint(vx, vy);
+    const pageWidthPdf = viewport.width / scale;
+    const size = 12;
+    const lineHeight = size * 1.2;
+    const el = document.createElement("div");
+    el.className = "pdfedit-para pdfedit-active";
+    el.contentEditable = "true";
+    el.spellcheck = false;
+    el.style.left = `${vx}px`;
+    el.style.top = `${vy}px`;
+    el.style.width = `${Math.max(60, pageWidthPdf - pdfX - 10) * scale}px`;
+    el.style.minHeight = `${size * scale}px`;
+    el.style.fontSize = `${size * scale}px`;
+    el.style.lineHeight = `${lineHeight * scale}px`;
+    el.style.fontFamily = cssFamily("sans");
+    el.style.color = "#000";
+    el.style.setProperty("--c", "#000");
+    el.style.setProperty("--bg", "#ffffff");
+    const para: Paragraph = {
+      page: pageIndex,
+      x: pdfX,
+      w: Math.max(60, pageWidthPdf - pdfX - 10),
+      topY: pdfY,
+      bottomY: pdfY - lineHeight,
+      firstBaseline: pdfY - size * 0.8,
+      lineHeight,
+      size,
+      align: "left",
+      family: "sans",
+      baseFontKey: "",
+      color: { r: 0, g: 0, b: 0 },
+      bg: { r: 1, g: 1, b: 1 },
+      origText: "",
+      dirty: false,
+      el,
+      viewport,
+      anchorText: "",
+      anchors: [],
+      glyphPreserve: false,
+      isNew: true,
+    };
+    wirePara(para);
+    pageEl.appendChild(el);
+    paragraphs.push(para);
+    el.focus();
+  };
+
   const onSelChange = () => {
     const sel = document.getSelection();
     if (!sel || sel.rangeCount === 0) return;
@@ -1303,6 +1394,15 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       if (cctx) await page.render({ canvasContext: cctx, viewport, canvas }).promise;
       pageEl.appendChild(canvas);
       pageEls.push({ el: pageEl, viewport, index: p - 1 });
+      // Double-click a blank spot (not on existing text or an image) to add a text box there.
+      const pageIndex = p - 1;
+      const pageViewport = viewport;
+      const thisPageEl = pageEl;
+      pageEl.addEventListener("dblclick", (e) => {
+        const t = e.target as HTMLElement;
+        if (t.closest(".pdfedit-para") || t.closest(".pdfedit-img")) return;
+        addTextAt(thisPageEl, pageViewport, pageIndex, e.clientX, e.clientY);
+      });
 
       const content = await page.getTextContent();
       const allItems: RunItem[] = [];
@@ -1595,32 +1695,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           glyphPreserve:
             blockHasFragile && paraAnchors.length === anchorText.length && paraAnchors.some((a) => a !== null),
         };
-        el.addEventListener("focus", () => {
-          activePara = para;
-          savedPara = para;
-          // Mark this paragraph active (keeps its border + visible overlay even after focus
-          // moves to a toolbar control); the native selection shows while it's focused.
-          for (const p of paragraphs) p.el.classList.toggle("pdfedit-active", p === para);
-          clearHighlight();
-          toolbar.update({ sizePt: para.size, family: para.family });
-        });
-        // When focus moves to a toolbar control, keep this paragraph active and paint the
-        // saved selection ourselves (the native highlight hides on blur). When focus leaves
-        // the editor entirely, drop the active state so the page shows normally again.
-        el.addEventListener("blur", (e) => {
-          const to = e.relatedTarget as Node | null;
-          if (to && toolbar.el.contains(to)) {
-            showSavedHighlight();
-          } else {
-            el.classList.remove("pdfedit-active");
-            clearHighlight();
-          }
-        });
-        el.addEventListener("input", () => {
-          para.dirty = true;
-          el.classList.add("pdfedit-edited");
-          change();
-        });
+        wirePara(para);
         pageEl.appendChild(el);
         paragraphs.push(para);
       }
@@ -1725,7 +1800,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       for (const pp of editedParas) {
         const page = pages[pp.page];
         if (!page) continue;
-        page.drawRectangle({ x: pp.x, y: pp.bottomY, width: Math.max(pp.w, 1), height: Math.max(pp.topY - pp.bottomY, 1), color: rgb(pp.bg.r, pp.bg.g, pp.bg.b) });
+        // Cover the original text region before redrawing; a box added in blank space has
+        // nothing to cover (and a white rectangle could hide a coloured background/image).
+        if (!pp.isNew) {
+          page.drawRectangle({ x: pp.x, y: pp.bottomY, width: Math.max(pp.w, 1), height: Math.max(pp.topY - pp.bottomY, 1), color: rgb(pp.bg.r, pp.bg.g, pp.bg.b) });
+        }
         // Fallback for text typed directly in the block (outside any span): the paragraph's
         // dominant font, so stray text exports in the document font, not a generic one.
         const baseRec = fontRecs.get(pp.baseFontKey);

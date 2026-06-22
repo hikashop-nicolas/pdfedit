@@ -114,6 +114,41 @@ describe("pdfedit toolbar", () => {
     });
   });
 
+  it("adds a text box on double-click in blank space and exports it", () => {
+    openFixture();
+    cy.window().then((win) => {
+      (win as unknown as { __exported: Uint8Array | null }).__exported = null;
+      const orig = win.URL.createObjectURL.bind(win.URL);
+      win.URL.createObjectURL = (b: Blob) => {
+        if (b instanceof win.Blob)
+          void b.arrayBuffer().then((ab) => ((win as unknown as { __exported: Uint8Array }).__exported = new Uint8Array(ab)));
+        return orig(b);
+      };
+    });
+    // Double-click a blank area (lower part of the page, away from the text at the top).
+    cy.get(".pdfedit-page")
+      .first()
+      .then(($p) => {
+        const r = $p[0]!.getBoundingClientRect();
+        cy.wrap($p).dblclick(r.width * 0.3, r.height * 0.45, { force: true });
+      });
+    cy.get(".pdfedit-para.pdfedit-active").should("exist");
+    cy.focused().type("ADDEDTEXT");
+    cy.get("#save").click();
+    cy.window().its("__exported").should("exist");
+    cy.window().then((win) => {
+      const bytes = (win as unknown as { __exported: Uint8Array }).__exported;
+      const file = new win.File([bytes as BlobPart], "x.pdf", { type: "application/pdf" });
+      const dt = new win.DataTransfer();
+      dt.items.add(file);
+      const inp = win.document.getElementById("file") as HTMLInputElement;
+      inp.files = dt.files;
+      inp.dispatchEvent(new win.Event("change", { bubbles: true }));
+    });
+    cy.get(".pdfedit-para", { timeout: RENDER_TIMEOUT }).should("exist");
+    cy.get("#editor").should("contain.text", "ADDEDTEXT");
+  });
+
   it("keeps an Enter line break on its own line through export (Chrome inserts a <div>)", () => {
     openFixture();
     cy.window().then((win) => {
