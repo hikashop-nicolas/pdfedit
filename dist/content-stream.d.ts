@@ -43,6 +43,7 @@ export interface PlacedGlyph {
     y: number;
     width: number;
     size: number;
+    visible: boolean;
 }
 /**
  * Lay out every shown glyph with its user-space position and advance, using the per-font

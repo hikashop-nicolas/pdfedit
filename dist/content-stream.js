@@ -266,13 +266,23 @@ export function layoutGlyphs(content, metricsOf) {
     let tc = 0; // char spacing
     let tw = 0; // word spacing
     let th = 1; // horizontal scale (Tz/100)
+    let tr = 0; // text render mode
+    let fill = [0, 0, 0]; // non-stroking fill colour
     let operands = [];
     const nums = () => operands.filter((t) => t.t === "num").map((t) => t.v);
+    const isVisible = () => {
+        if (tr === 3 || tr === 7)
+            return false; // invisible / clip-only text
+        const hasFill = tr === 0 || tr === 2 || tr === 4 || tr === 6;
+        const white = fill[0] >= 0.95 && fill[1] >= 0.95 && fill[2] >= 0.95;
+        return !(hasFill && white); // white fill on a (white) page is invisible
+    };
     const showElements = (els) => {
         const fm = metricsOf(fontRes);
         if (!fm)
             return;
         const bpc = fm.bytesPerCode;
+        const visible = isVisible();
         for (const el of els) {
             if (el.t === "num") {
                 // TJ kerning: shift left by num/1000 * size (in text space), scaled by th
@@ -290,7 +300,7 @@ export function layoutGlyphs(content, metricsOf) {
                 const isSpace = bpc === 1 && code === 32;
                 const tx = ((w0 / 1000) * fontSize + tc + (isSpace ? tw : 0)) * th;
                 const widthUser = tx * Math.hypot(M[0], M[1]);
-                glyphs.push({ fontRes, code, hex: codeHex, x: M[4], y: M[5], width: widthUser, size });
+                glyphs.push({ fontRes, code, hex: codeHex, x: M[4], y: M[5], width: widthUser, size, visible });
                 tm = mul([1, 0, 0, 1, tx, 0], tm);
             }
         }
@@ -335,6 +345,25 @@ export function layoutGlyphs(content, metricsOf) {
                     fontRes = nm.v;
                 if (a.length)
                     fontSize = a[a.length - 1];
+                break;
+            }
+            case "Tr":
+                if (a.length)
+                    tr = a[a.length - 1];
+                break;
+            case "rg":
+                if (a.length >= 3)
+                    fill = [a[a.length - 3], a[a.length - 2], a[a.length - 1]];
+                break;
+            case "g":
+                if (a.length)
+                    fill = [a[a.length - 1], a[a.length - 1], a[a.length - 1]];
+                break;
+            case "k": {
+                if (a.length >= 4) {
+                    const [c, m, y, kk] = a.slice(-4);
+                    fill = [(1 - c) * (1 - kk), (1 - m) * (1 - kk), (1 - y) * (1 - kk)];
+                }
                 break;
             }
             case "Tc":

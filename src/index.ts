@@ -76,6 +76,8 @@ interface RunItem {
   fontName: string;
   /** Per-character original-glyph anchors (font resource + byte code), when recoverable. */
   anchors?: (Anchor | null)[];
+  /** The glyphs are drawn invisibly (white fill / render mode 3), so omit from the overlay. */
+  invisible?: boolean;
 }
 interface Line {
   items: RunItem[];
@@ -1311,6 +1313,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
             .filter((g) => Math.abs(g.y - it.y) <= it.size * 0.4 && g.x + g.width / 2 >= it.x && g.x + g.width / 2 <= it.x + it.w)
             .sort((a, b) => a.x - b.x);
           if (here.length !== chars.length) continue; // mismatched mapping: leave un-anchored
+          if (here.every((g) => !g.visible)) {
+            it.invisible = true; // white/invisible text: drawn but not visible, omit from the overlay
+            continue;
+          }
           const fg = cctx ? sampleRunStats(cctx, viewport, it.x, it.y, it.w, it.size).fg : { r: 0, g: 0, b: 0 };
           const color = { r: fg.r / 255, g: fg.g / 255, b: fg.b / 255 };
           it.anchors = here.map((g) => ({ fontRes: g.fontRes, hex: g.hex, width: g.width, size: g.size, color }));
@@ -1366,7 +1372,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           }
         : undefined;
 
-      for (const lines of buildParagraphs(items, bgOf)) {
+      for (const lines of buildParagraphs(items.filter((it) => !it.invisible), bgOf)) {
         const first = lines[0]!;
         if (lines.every((l) => l.text.trim() === "")) continue;
         const boxX = Math.min(...lines.map((l) => l.minX));

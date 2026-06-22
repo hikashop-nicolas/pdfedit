@@ -1226,6 +1226,10 @@ export function createPdfEditor(container, bytes, options = {}) {
                         .sort((a, b) => a.x - b.x);
                     if (here.length !== chars.length)
                         continue; // mismatched mapping: leave un-anchored
+                    if (here.every((g) => !g.visible)) {
+                        it.invisible = true; // white/invisible text: drawn but not visible, omit from the overlay
+                        continue;
+                    }
                     const fg = cctx ? sampleRunStats(cctx, viewport, it.x, it.y, it.w, it.size).fg : { r: 0, g: 0, b: 0 };
                     const color = { r: fg.r / 255, g: fg.g / 255, b: fg.b / 255 };
                     it.anchors = here.map((g) => ({ fontRes: g.fontRes, hex: g.hex, width: g.width, size: g.size, color }));
@@ -1285,7 +1289,7 @@ export function createPdfEditor(container, bytes, options = {}) {
                     }
                 }
                 : undefined;
-            for (const lines of buildParagraphs(items, bgOf)) {
+            for (const lines of buildParagraphs(items.filter((it) => !it.invisible), bgOf)) {
                 const first = lines[0];
                 if (lines.every((l) => l.text.trim() === ""))
                     continue;
