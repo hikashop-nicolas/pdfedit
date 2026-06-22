@@ -501,6 +501,24 @@ export function createPdfEditor(container, bytes, options = {}) {
     const fontRecs = new Map();
     const puaFonts = new Set(); // fonts whose text was Private-Use-Area encoded (symbol cmap)
     const faces = new Map();
+    // For fonts whose cmap is unusable in HTML: displayed char -> original glyph id, per pdf.js
+    // font, used to build a display-only @font-face that shows the true glyph shapes.
+    const displayFontChars = new Map();
+    const displayFamilies = new Map();
+    const displayCharByGid = new Map();
+    let displayCharCounter = 0;
+    // A unique BMP Private-Use char (0xE000+) per font+glyph, used as the overlay placeholder
+    // for an unreliable glyph so the display font can map it to the real outline without
+    // colliding with real text (BMP keeps it one code unit, so anchor alignment holds).
+    const displayCharFor = (fontName, gid) => {
+        const k = `${fontName}:${gid}`;
+        let ch = displayCharByGid.get(k);
+        if (!ch) {
+            ch = String.fromCharCode(0xe000 + (displayCharCounter++ % 0x1000));
+            displayCharByGid.set(k, ch);
+        }
+        return ch;
+    };
     const registerFace = (key, data) => {
         const name = `pf_${uid}_${key.replace(/[^a-zA-Z0-9_]/g, "")}`;
         if (faces.has(name))
@@ -648,6 +666,52 @@ export function createPdfEditor(container, bytes, options = {}) {
                     span.style.fontSynthesis = "none";
                     span.style.textShadow = "0.35px 0 0 currentColor";
                 }
+            });
+        }
+    };
+    // Build a display-only @font-face per unreliable font from its real glyph outlines, and
+    // apply it so the overlay shows the true shapes (e.g. "Śląski") instead of mojibake. The
+    // saved file is unaffected (it re-emits the original glyphs); this is purely visual.
+    const applyDisplayFonts = async () => {
+        if (!displayFontChars.size)
+            return;
+        let mod;
+        try {
+            mod = await import("./display-font");
+        }
+        catch {
+            return;
+        }
+        for (const [fontName, cmap] of displayFontChars) {
+            const rec = fontRecs.get(fontName);
+            if (!rec?.data || !cmap.size)
+                continue;
+            const family = `pdfedit_disp_${uid}_${fontName.replace(/[^a-zA-Z0-9_]/g, "")}`;
+            let buf = null;
+            try {
+                buf = mod.buildDisplayFont(rec.data, cmap, family);
+            }
+            catch {
+                buf = null;
+            }
+            if (!buf)
+                continue;
+            try {
+                const ff = new FontFace(family, buf);
+                faces.set(family, ff);
+                document.fonts.add(ff);
+                await ff.load();
+                displayFamilies.set(fontName, family);
+            }
+            catch {
+                /* couldn't load the built font; the span keeps its placeholder text */
+            }
+        }
+        for (const para of paragraphs) {
+            para.el.querySelectorAll("span[data-font]").forEach((span) => {
+                const fam = span.dataset.font ? displayFamilies.get(span.dataset.font) : undefined;
+                if (fam)
+                    span.style.fontFamily = `'${fam}', ${span.style.fontFamily}`;
             });
         }
     };
@@ -1150,6 +1214,7 @@ export function createPdfEditor(container, bytes, options = {}) {
             const pageHasFragileFont = items.some((it) => puaFonts.has(it.fontName));
             if (pageHasFragileFont) {
                 const placed = await glyphsForPage(p - 1);
+                const fontStats = new Map();
                 for (const it of items) {
                     const chars = [...it.str];
                     if (!chars.length)
@@ -1164,6 +1229,42 @@ export function createPdfEditor(container, bytes, options = {}) {
                     const fg = cctx ? sampleRunStats(cctx, viewport, it.x, it.y, it.w, it.size).fg : { r: 0, g: 0, b: 0 };
                     const color = { r: fg.r / 255, g: fg.g / 255, b: fg.b / 255 };
                     it.anchors = here.map((g) => ({ fontRes: g.fontRes, hex: g.hex, width: g.width, size: g.size, color }));
+                    const st = fontStats.get(it.fontName) ?? { alnum: 0, total: 0 };
+                    for (const ch of chars) {
+                        st.total++;
+                        if (/[\p{L}\p{N}]/u.test(ch))
+                            st.alnum++;
+                    }
+                    fontStats.set(it.fontName, st);
+                }
+                // A font whose decoded text is mostly NOT letters/digits is one whose Unicode is
+                // unreliable (the glyphs have no real characters, only shapes). For those, swap the
+                // displayed text for unique private codepoints and render the true outlines via a
+                // built display font, so the overlay shows the real glyphs instead of mojibake.
+                const unreliable = new Set();
+                for (const [fn, st] of fontStats)
+                    if (st.total >= 2 && st.alnum / st.total < 0.5)
+                        unreliable.add(fn);
+                for (const it of items) {
+                    if (!it.anchors || !unreliable.has(it.fontName))
+                        continue;
+                    let cmap = displayFontChars.get(it.fontName);
+                    if (!cmap)
+                        displayFontChars.set(it.fontName, (cmap = new Map()));
+                    const chars = [...it.str];
+                    let s = "";
+                    for (let k = 0; k < chars.length; k++) {
+                        const a = it.anchors[k];
+                        if (!a) {
+                            s += chars[k];
+                            continue;
+                        }
+                        const gid = parseInt(a.hex, 16);
+                        const dch = displayCharFor(it.fontName, gid);
+                        cmap.set(dch, gid);
+                        s += dch;
+                    }
+                    it.str = s;
                 }
             }
             // Sample the background under a line so the grouper can split blocks that differ in
@@ -1401,6 +1502,7 @@ export function createPdfEditor(container, bytes, options = {}) {
             root.appendChild(pageEl);
         }
         upgradeOverlayFonts();
+        await applyDisplayFonts();
     })().catch((e) => console.error("[pdfedit] render failed", e));
     return {
         isDirty() {
