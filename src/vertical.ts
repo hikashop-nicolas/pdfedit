@@ -15,13 +15,6 @@ export interface VCol {
   text: string;
 }
 
-const median = (xs: number[]): number => {
-  if (!xs.length) return 0;
-  const s = xs.slice().sort((a, b) => a - b);
-  const m = s.length >> 1;
-  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
-};
-
 // Conservative: only pages of mostly single glyphs that step downward, so normal prose
 // (multi-char items) and horizontal CJK are never misclassified as vertical.
 export function detectVertical(items: RunItem[]): boolean {
@@ -84,7 +77,10 @@ export function buildColumns(items: RunItem[]): VCol[] {
     };
     for (const it of col) {
       const s = Math.max(it.size, segSize || it.size);
-      if (seg.length && prevY - it.y > s * 2.2) flush();
+      // Split only on a large vertical gap (a genuine break / separate region); a smaller gap
+      // is kept so an embedded horizontal number (e.g. a year) that leaves a few glyph-heights
+      // of space does not chop the sentence into separate columns.
+      if (seg.length && prevY - it.y > s * 5) flush();
       seg.push(it);
       prevY = it.y;
       segSize = Math.max(segSize, it.size);
@@ -139,40 +135,37 @@ export function layoutVerticalGlyphs(runs: VLayoutRun[], p: { startX: number; to
   return out;
 }
 
-// Group adjacent columns (right-to-left) into blocks of uniform column spacing: the first
-// gap sets a block's pitch, and a later column only joins if its gap matches (and it shares
-// size and vertical extent). A wider gap between paragraphs, or a spacing change, starts a
-// new block, so each block renders at its own real spacing instead of one averaged pitch.
+// Group adjacent columns (right-to-left) into blocks by column spacing, using look-ahead so
+// paragraph structure survives. A column starts a new block when its incoming gap is a
+// "separator": notably wider than the tighter of its neighbouring gaps (so a column that
+// begins a more tightly-spaced run, i.e. a paragraph, is not absorbed into the wider-spaced
+// group before it), or when size/vertical-extent changes. Each block then renders at its own
+// spacing, and a wrapped paragraph keeps its continuation columns.
 export function buildVerticalBlocks(items: RunItem[]): VCol[][] {
   const cols = buildColumns(items).sort((a, b) => b.x - a.x);
   if (!cols.length) return [];
-  const gaps: number[] = [];
-  for (let i = 1; i < cols.length; i++) {
-    const d = cols[i - 1]!.x - cols[i]!.x;
-    if (d > 1) gaps.push(d);
-  }
-  const globalBase = median(gaps) || cols[0]!.size * 1.6;
+  const gapAt = (i: number): number => cols[i - 1]!.x - cols[i]!.x; // gap before cols[i]
   const blocks: VCol[][] = [];
   let cur: VCol[] = [cols[0]!];
-  let curPitch = 0; // this block's spacing, set from its first gap
   for (let i = 1; i < cols.length; i++) {
     const c = cols[i]!;
-    const last = cur[cur.length - 1]!;
-    const gap = last.x - c.x;
-    const sameSize = Math.abs(last.size - c.size) <= last.size * 0.15;
-    const overlap = Math.min(last.maxY, c.maxY) - Math.max(last.minY, c.minY);
-    const minH = Math.min(last.maxY - last.minY, c.maxY - c.minY) || 1;
-    const yOk = overlap > minH * 0.3 || Math.abs(last.maxY - c.maxY) <= c.size;
-    // Establishing (block has one column): accept any plausible column gap. Otherwise the
-    // gap must be within ~30% of the block's established pitch.
-    const gapOk = curPitch === 0 ? gap > c.size * 0.5 && gap <= globalBase * 2.2 : gap >= curPitch * 0.7 && gap <= curPitch * 1.3;
-    if (sameSize && yOk && gapOk) {
-      if (curPitch === 0) curPitch = gap;
-      cur.push(c);
-    } else {
+    const prev = cols[i - 1]!;
+    const gIn = gapAt(i);
+    // The local rhythm is the tighter neighbouring gap (ignoring degenerate same-x gaps).
+    const valid = (g: number): number => (g > c.size * 0.4 ? g : Infinity);
+    const gPrev = i >= 2 ? valid(gapAt(i - 1)) : Infinity;
+    const gNext = i <= cols.length - 2 ? valid(gapAt(i + 1)) : Infinity;
+    const localTight = Math.min(gPrev, gNext);
+    const sameSize = Math.abs(prev.size - c.size) <= prev.size * 0.15;
+    const overlap = Math.min(prev.maxY, c.maxY) - Math.max(prev.minY, c.minY);
+    const minH = Math.min(prev.maxY - prev.minY, c.maxY - c.minY) || 1;
+    const yOk = overlap > minH * 0.3 || Math.abs(prev.maxY - c.maxY) <= c.size;
+    const separator = gIn <= c.size * 0.4 || gIn > localTight * 1.3;
+    if (!sameSize || !yOk || separator) {
       blocks.push(cur);
       cur = [c];
-      curPitch = 0;
+    } else {
+      cur.push(c);
     }
   }
   blocks.push(cur);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { detectVertical, buildVerticalBlocks, layoutVerticalGlyphs } from "./vertical";
+import { detectVertical, buildColumns, buildVerticalBlocks, layoutVerticalGlyphs } from "./vertical";
 
 // A RunItem-shaped glyph (only the fields the grouping reads).
 const g = (str: string, x: number, y: number, size = 12) => ({ str, x, y, w: size, size, fontName: "f1" });
@@ -54,6 +54,32 @@ describe("vertical (tategaki) detection and grouping", () => {
     const far = near.map((it) => ({ ...it, x: it.x - 400 })); // a second group well to the left
     const blocks = buildVerticalBlocks([...near, ...far]);
     expect(blocks.length).toBe(2);
+  });
+
+  it("keeps a wrapped paragraph's tight columns together, not absorbed by the wider group before it", () => {
+    // Three wide-spaced single-column items (pitch 40), then a paragraph whose first column is
+    // 40 from the last item but whose own continuation columns are tight (pitch 24).
+    const col = (x: number, chars: string[]) => chars.map((ch, i) => g(ch, x, 200 - i * 12));
+    const items = [
+      ...col(300, ["ア"]),
+      ...col(260, ["イ"]),
+      ...col(220, ["ウ"]),
+      ...col(180, ["漢", "字", "の"]),
+      ...col(156, ["読", "み", "や"]),
+      ...col(132, ["表", "記", "を"]),
+    ];
+    const blocks = buildVerticalBlocks(items);
+    const tight = blocks.find((b) => b.some((c) => c.x === 180))!;
+    // the paragraph starting at x=180 keeps its 156 and 132 continuation columns
+    expect(tight.map((c) => c.x)).toEqual([180, 156, 132]);
+  });
+
+  it("keeps a column whole across a moderate vertical gap (embedded number) but splits a huge one", () => {
+    const oneX = (x: number, ys: number[]) => ys.map((y, i) => g("字" + i, x, y));
+    // gap of 48 (4x the size) — an in-sentence break, stays one column
+    expect(buildColumns(oneX(100, [200, 188, 176, 128, 116, 104])).length).toBe(1);
+    // gap of 84 (7x) — a real break, two columns
+    expect(buildColumns(oneX(100, [200, 188, 104, 92])).length).toBe(2);
   });
 
   it("splits into separate blocks when the column spacing changes", () => {
