@@ -22,6 +22,7 @@ import {
 import { type PlacedGlyph } from "./content-stream";
 import { type Anchor, planEditedBlock } from "./glyph-edit";
 import { pageGlyphs } from "./pdf-glyphs";
+import { detectVertical, buildVerticalBlocks, layoutVerticalGlyphs, type VCol } from "./vertical";
 import { t } from "./i18n";
 
 // pdfedit: a standalone, framework-agnostic PDF editor.
@@ -109,7 +110,7 @@ interface FontRec {
   inkSum?: number; // accumulated glyph ink coverage (for bold-by-density detection)
   inkN?: number;
 }
-interface RunItem {
+export interface RunItem {
   str: string;
   x: number;
   y: number;
@@ -154,6 +155,12 @@ interface Paragraph {
   glyphPreserve: boolean;
   /** Added by the user in blank space (no original content to cover / preserve). */
   isNew?: boolean;
+  /** Tategaki block: glyphs flow top-to-bottom, columns right-to-left. */
+  vertical?: boolean;
+  vStartX?: number; // rightmost column's glyph-origin x (draw start)
+  vTopY?: number; // top baseline (draw start y for each column)
+  vPitch?: number; // column spacing (positive px, right-to-left)
+  vBottomY?: number; // bottom baseline limit (wrap a column past it)
 }
 interface ImageItem {
   page: number;
@@ -1036,6 +1043,135 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     });
   };
 
+  // Render one tategaki block: a right-to-left run of columns as a single vertical-rl
+  // editable box. Columns are joined by <br> (a line break moves one column left).
+  const renderVerticalBlock = (
+    cols: VCol[],
+    pageIndex: number,
+    page: pdfjsLib.PDFPageProxy,
+    viewport: pdfjsLib.PageViewport,
+    cctx: CanvasRenderingContext2D | null,
+    pageEl: HTMLElement,
+  ): void => {
+    const all = cols.flatMap((c) => c.items);
+    if (!all.length || cols.every((c) => c.text.trim() === "")) return;
+    const size = median(all.map((i) => i.size)) || 12;
+    const pitches: number[] = [];
+    for (let i = 1; i < cols.length; i++) {
+      const d = Math.abs(cols[i - 1]!.x - cols[i]!.x);
+      if (d > 1) pitches.push(d);
+    }
+    const pitch = median(pitches) || size * 1.6;
+    const leftExtent = Math.min(...all.map((i) => i.x));
+    const rightX = Math.max(...all.map((i) => i.x)); // rightmost column glyph-origin
+    const rightExtent = rightX + size;
+    const topBaseline = Math.max(...all.map((i) => i.y));
+    const topExtent = topBaseline + size * 0.85;
+    const botExtent = Math.min(...all.map((i) => i.y)) - size * 0.15;
+    const tl = viewport.convertToViewportPoint(leftExtent, topExtent);
+    const br = viewport.convertToViewportPoint(rightExtent, botExtent);
+    const left = Math.min(tl[0]!, br[0]!);
+    const top = Math.min(tl[1]!, br[1]!);
+    const wPx = Math.abs(br[0]! - tl[0]!);
+    const hPx = Math.abs(br[1]! - tl[1]!);
+    const { fg, bg } = cctx ? sampleColors(cctx, left, top, wPx, hPx) : { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 } };
+    const fgHex = rgb255ToHex(fg);
+
+    // Build styled spans column by column (right-to-left), glyphs top-to-bottom.
+    const fontCount = new Map<string, number>();
+    let html = "";
+    cols.forEach((col, ci) => {
+      let curFont = "";
+      let curSize = 0;
+      let curText = "";
+      const flush = () => {
+        if (!curText) return;
+        const rec = getFontRec(page, curFont);
+        const parts: string[] = [];
+        if (rec.bold) parts.push("font-weight:bold");
+        if (rec.italic) parts.push("font-style:italic");
+        parts.push(`font-family:${rec.cssName ? `'${rec.cssName}', ${cssFamily(rec.family)}` : cssFamily(rec.family)}`);
+        parts.push(`font-size:${(curSize * scale).toFixed(2)}px`);
+        parts.push(`color:${fgHex}`);
+        html += `<span data-font="${curFont}" style="${parts.join(";")}">${escapeHtml(curText)}</span>`;
+        curText = "";
+      };
+      for (const it of col.items) {
+        if (it.str === "") continue;
+        fontCount.set(it.fontName, (fontCount.get(it.fontName) ?? 0) + it.str.length);
+        const szR = Math.round(it.size * 10) / 10;
+        if (it.fontName !== curFont || szR !== curSize) {
+          flush();
+          curFont = it.fontName;
+          curSize = szR;
+        }
+        curText += it.str;
+      }
+      flush();
+      if (ci !== cols.length - 1) html += "<br>";
+    });
+
+    let baseFontName = all[0]!.fontName;
+    let bestN = -1;
+    for (const [fn, n] of fontCount) {
+      if (n > bestN) {
+        bestN = n;
+        baseFontName = fn;
+      }
+    }
+    const baseRec = getFontRec(page, baseFontName);
+
+    const el = document.createElement("div");
+    el.className = "pdfedit-para";
+    el.contentEditable = "true";
+    el.spellcheck = false;
+    el.innerHTML = html || escapeHtml(cols.map((c) => c.text).join(""));
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    el.style.width = `${Math.max(wPx, size * scale)}px`;
+    el.style.height = `${Math.max(hPx, size * scale)}px`;
+    el.style.writingMode = "vertical-rl";
+    el.style.fontSize = `${size * scale}px`;
+    el.style.lineHeight = `${pitch * scale}px`;
+    el.style.fontWeight = "normal";
+    el.style.fontStyle = "normal";
+    el.style.fontFamily = cssFamily(baseRec.family);
+    el.style.color = fgHex;
+    el.style.setProperty("--c", fgHex);
+    el.style.setProperty("--bg", rgb255ToHex(bg));
+
+    const para: Paragraph = {
+      page: pageIndex,
+      x: leftExtent,
+      w: rightExtent - leftExtent,
+      topY: topExtent,
+      bottomY: botExtent,
+      firstBaseline: topBaseline,
+      lineHeight: pitch,
+      size,
+      align: "left",
+      family: baseRec.family,
+      baseFontKey: baseFontName,
+      color: norm(fg),
+      bg: norm(bg),
+      origText: cols.map((c) => c.text).join("\n"),
+      dirty: false,
+      el,
+      viewport,
+      anchorText: "",
+      anchors: [],
+      glyphPreserve: false,
+      vertical: true,
+      vStartX: rightX,
+      vTopY: topBaseline,
+      vPitch: pitch,
+      vBottomY: botExtent,
+    };
+    wirePara(para);
+    pageEl.appendChild(el);
+    paragraphs.push(para);
+  };
+
   // Add a new editable text box at a blank spot (double-clicked) on a page.
   // Create an added text box at a PDF-space position. Used by the double-click handler and by
   // session restore (which passes a saved width/size/style and content instead of defaults).
@@ -1649,7 +1785,13 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           }
         : undefined;
 
-      for (const lines of buildParagraphs(items.filter((it) => !it.invisible), bgOf)) {
+      const visible = items.filter((it) => !it.invisible);
+      if (detectVertical(visible)) {
+        for (const cols of buildVerticalBlocks(visible)) renderVerticalBlock(cols, p - 1, page, viewport, cctx, pageEl);
+        root.appendChild(pageEl);
+        continue;
+      }
+      for (const lines of buildParagraphs(visible, bgOf)) {
         const first = lines[0]!;
         if (lines.every((l) => l.text.trim() === "")) continue;
         const boxX = Math.min(...lines.map((l) => l.minX));
@@ -2014,7 +2156,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           fontKey: baseRec ? pp.baseFontKey : undefined,
         };
         const runs = parseRuns(pp.el, base, scale);
-        await drawRuns(pdf, page, pp, runs, resolveToken);
+        if (pp.vertical) await drawVerticalRuns(page, pp, runs, resolveToken);
+        else await drawRuns(pdf, page, pp, runs, resolveToken);
       }
 
       for (const im of images) {
@@ -2088,6 +2231,32 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         } catch {
           /* glyph not encodable in the substitute font */
         }
+      }
+    }
+  }
+
+  // Tategaki export: lay characters down each column (y decreasing by the glyph size),
+  // columns marching right-to-left by the column pitch. A <br> (brAfter) starts a new
+  // column; a column that would overflow the block's bottom wraps to the next one left.
+  async function drawVerticalRuns(
+    page: PDFPage,
+    pp: Paragraph,
+    runs: StyledRun[],
+    resolveToken: (run: StyledRun, part: string, space: boolean) => Promise<{ font: PDFFont; text: string; faux: boolean }>,
+  ): Promise<void> {
+    const glyphs = layoutVerticalGlyphs(runs, {
+      startX: pp.vStartX ?? pp.x,
+      topY: pp.vTopY ?? pp.topY,
+      pitch: pp.vPitch ?? pp.size * 1.6,
+      bottom: (pp.vBottomY ?? pp.bottomY) + pp.size * 0.1,
+    });
+    for (const gph of glyphs) {
+      const run = runs[gph.runIndex]!;
+      const { font, text } = await resolveToken(run, gph.ch, false);
+      try {
+        page.drawText(text, { x: gph.x, y: gph.y, size: run.size, font, color: rgb(run.color.r, run.color.g, run.color.b) });
+      } catch {
+        /* glyph not encodable in the resolved font */
       }
     }
   }
