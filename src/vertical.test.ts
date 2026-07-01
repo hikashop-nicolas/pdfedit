@@ -55,6 +55,23 @@ describe("vertical (tategaki) detection and grouping", () => {
     const blocks = buildVerticalBlocks([...near, ...far]);
     expect(blocks.length).toBe(2);
   });
+
+  it("splits into separate blocks when the column spacing changes", () => {
+    // Paragraph A: 3 columns at pitch 20; paragraph B: 3 columns at pitch 32, a wider gap apart.
+    const col = (x: number, chars: string[]) => chars.map((ch, i) => g(ch, x, 200 - i * 12));
+    const items = [
+      ...col(200, ["あ", "い", "う"]),
+      ...col(180, ["か", "き", "く"]),
+      ...col(160, ["さ", "し", "す"]),
+      ...col(100, ["た", "ち", "つ"]),
+      ...col(68, ["な", "に", "ぬ"]),
+      ...col(36, ["は", "ひ", "ふ"]),
+    ];
+    const blocks = buildVerticalBlocks(items);
+    expect(blocks.length).toBe(2);
+    expect(blocks[0]!.map((c) => c.x)).toEqual([200, 180, 160]);
+    expect(blocks[1]!.map((c) => c.x)).toEqual([100, 68, 36]);
+  });
 });
 
 describe("vertical export layout", () => {

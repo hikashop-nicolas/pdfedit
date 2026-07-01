@@ -139,36 +139,42 @@ export function layoutVerticalGlyphs(runs: VLayoutRun[], p: { startX: number; to
   return out;
 }
 
-// Group adjacent columns (right-to-left) that share size and vertical extent into one
-// editable block, so a multi-column paragraph edits and reflows together.
+// Group adjacent columns (right-to-left) into blocks of uniform column spacing: the first
+// gap sets a block's pitch, and a later column only joins if its gap matches (and it shares
+// size and vertical extent). A wider gap between paragraphs, or a spacing change, starts a
+// new block, so each block renders at its own real spacing instead of one averaged pitch.
 export function buildVerticalBlocks(items: RunItem[]): VCol[][] {
   const cols = buildColumns(items).sort((a, b) => b.x - a.x);
   if (!cols.length) return [];
-  const pitches: number[] = [];
+  const gaps: number[] = [];
   for (let i = 1; i < cols.length; i++) {
     const d = cols[i - 1]!.x - cols[i]!.x;
-    if (d > 1) pitches.push(d);
+    if (d > 1) gaps.push(d);
   }
-  const medPitch = median(pitches) || cols[0]!.size * 1.6;
+  const globalBase = median(gaps) || cols[0]!.size * 1.6;
   const blocks: VCol[][] = [];
-  for (const c of cols) {
-    let best: VCol[] | null = null;
-    let bestGap = Infinity;
-    for (const b of blocks) {
-      const last = b[b.length - 1]!;
-      const gap = last.x - c.x; // c sits to the left of the block's last column
-      if (gap <= 0 || gap > medPitch * 1.6) continue;
-      if (Math.abs(last.size - c.size) > last.size * 0.15) continue;
-      const overlap = Math.min(last.maxY, c.maxY) - Math.max(last.minY, c.minY);
-      const minH = Math.min(last.maxY - last.minY, c.maxY - c.minY) || 1;
-      if (overlap < minH * 0.3 && Math.abs(last.maxY - c.maxY) > c.size) continue;
-      if (gap < bestGap) {
-        best = b;
-        bestGap = gap;
-      }
+  let cur: VCol[] = [cols[0]!];
+  let curPitch = 0; // this block's spacing, set from its first gap
+  for (let i = 1; i < cols.length; i++) {
+    const c = cols[i]!;
+    const last = cur[cur.length - 1]!;
+    const gap = last.x - c.x;
+    const sameSize = Math.abs(last.size - c.size) <= last.size * 0.15;
+    const overlap = Math.min(last.maxY, c.maxY) - Math.max(last.minY, c.minY);
+    const minH = Math.min(last.maxY - last.minY, c.maxY - c.minY) || 1;
+    const yOk = overlap > minH * 0.3 || Math.abs(last.maxY - c.maxY) <= c.size;
+    // Establishing (block has one column): accept any plausible column gap. Otherwise the
+    // gap must be within ~30% of the block's established pitch.
+    const gapOk = curPitch === 0 ? gap > c.size * 0.5 && gap <= globalBase * 2.2 : gap >= curPitch * 0.7 && gap <= curPitch * 1.3;
+    if (sameSize && yOk && gapOk) {
+      if (curPitch === 0) curPitch = gap;
+      cur.push(c);
+    } else {
+      blocks.push(cur);
+      cur = [c];
+      curPitch = 0;
     }
-    if (best) best.push(c);
-    else blocks.push([c]);
   }
+  blocks.push(cur);
   return blocks;
 }
