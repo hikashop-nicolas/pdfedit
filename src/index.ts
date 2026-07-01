@@ -1325,17 +1325,6 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       touch();
     };
 
-    const textBtn = (label: string, title: string, css: string, fn: () => void) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = label;
-      b.title = title;
-      b.setAttribute("aria-label", title); // "B"/"I" alone are not descriptive names
-      if (css) b.style.cssText = css;
-      b.addEventListener("click", () => withSel(fn));
-      keepSel(b);
-      return b;
-    };
     const iconBtn = (svg: string, title: string, fn: () => void) => {
       const b = document.createElement("button");
       b.type = "button";
@@ -1353,10 +1342,25 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       return s;
     };
 
-    el.append(
-      textBtn("B", t("bold"), "font-weight:bold", () => exec("bold")),
-      textBtn("I", t("italic"), "font-style:italic", () => exec("italic")),
-    );
+    // Bold/italic are toggles: expose and update aria-pressed from the selection's state.
+    const toggleBtn = (label: string, title: string, css: string, cmd: string) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = title;
+      b.setAttribute("aria-label", title);
+      b.setAttribute("aria-pressed", "false");
+      if (css) b.style.cssText = css;
+      b.addEventListener("click", () => {
+        withSel(() => exec(cmd));
+        try { b.setAttribute("aria-pressed", String(document.queryCommandState(cmd))); } catch { /* no active editable */ }
+      });
+      keepSel(b);
+      return b;
+    };
+    const boldBtn = toggleBtn("B", t("bold"), "font-weight:bold", "bold");
+    const italBtn = toggleBtn("I", t("italic"), "font-style:italic", "italic");
+    el.append(boldBtn, italBtn);
 
     const color = document.createElement("input");
     color.type = "color";
@@ -1473,6 +1477,13 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       if (o.sizePt != null && isFinite(o.sizePt)) size.value = String(Math.round(o.sizePt));
       if (o.family) font.value = o.family;
       if (o.colorHex) color.value = o.colorHex;
+      // Reflect the current selection's bold/italic state on the toggle buttons.
+      try {
+        boldBtn.setAttribute("aria-pressed", String(document.queryCommandState("bold")));
+        italBtn.setAttribute("aria-pressed", String(document.queryCommandState("italic")));
+      } catch {
+        /* no active editable */
+      }
     };
     return { el, update, setZoom };
   }
