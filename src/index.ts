@@ -683,8 +683,32 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   const pageEls: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number }[] = [];
   let displayZoom = loadZoomPct() / 100; // visual zoom only (persisted); render scale + PDF coords unchanged
   const applyZoom = (z: number) => {
+    // Anchor the page under the viewport centre so it stays put across the zoom change;
+    // otherwise scrollTop is a fixed number while page heights change and the view jumps
+    // to a neighbouring page. getBoundingClientRect gives real screen px, robust to CSS
+    // zoom (which makes offsetTop/offsetHeight unreliable) and to the fixed inter-page gaps.
+    const rootRect = root.getBoundingClientRect();
+    const cy = rootRect.top + root.clientHeight / 2;
+    const cx = rootRect.left + root.clientWidth / 2;
+    let anchor: HTMLElement | null = null;
+    let fy = 0;
+    let fx = 0;
+    for (let i = 0; i < pageEls.length; i++) {
+      const r = pageEls[i].el.getBoundingClientRect();
+      if (cy < r.bottom || i === pageEls.length - 1) {
+        anchor = pageEls[i].el;
+        fy = r.height ? (cy - r.top) / r.height : 0;
+        fx = r.width ? (cx - r.left) / r.width : 0;
+        break;
+      }
+    }
     displayZoom = z;
     for (const p of pageEls) p.el.style.zoom = String(z);
+    if (anchor) {
+      const r = anchor.getBoundingClientRect();
+      root.scrollTop += r.top + fy * r.height - cy;
+      root.scrollLeft += r.left + fx * r.width - cx;
+    }
   };
   let destroyed = false;
   let activePara: Paragraph | null = null;
