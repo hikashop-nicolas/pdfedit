@@ -199,6 +199,7 @@ function injectStyles(): void {
   s.id = STYLE_ID;
   s.textContent = `
     .pdfedit-wrap { display:flex; flex-direction:column; height:100%; }
+    .pdfedit-live { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); border:0; }
     .pdfedit-toolbar {
       display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px 10px;
       background:#2b2f36; border-bottom:1px solid #1c1f24; color:#e6e6e6;
@@ -687,6 +688,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   const original = bytes.slice();
   const paragraphs: Paragraph[] = [];
   const images: ImageItem[] = [];
+  // Off-screen aria-live region for status announcements (e.g. zoom level).
+  const live = document.createElement("div");
+  live.className = "pdfedit-live";
+  live.setAttribute("aria-live", "polite");
   const pageEls: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number }[] = [];
   let displayZoom = loadZoomPct() / 100; // visual zoom only (persisted); render scale + PDF coords unchanged
   const applyZoom = (z: number) => {
@@ -943,7 +948,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   const toolbar = buildToolbar();
   const root = document.createElement("div");
   root.className = "pdfedit-root";
-  wrap.append(toolbar.el, root);
+  wrap.append(toolbar.el, root, live);
   container.appendChild(wrap);
 
   // Two-finger pinch zooms the document only (it drives the same zoom control as the
@@ -1130,6 +1135,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     el.className = "pdfedit-para";
     el.contentEditable = "true";
     el.spellcheck = false;
+    el.setAttribute("role", "textbox");
+    el.setAttribute("aria-multiline", "true");
     el.innerHTML = html || escapeHtml(cols.map((c) => c.text).join(""));
     el.style.right = `${Math.max(0, viewport.width - rightPx)}px`;
     el.style.top = `${top}px`;
@@ -1197,6 +1204,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     el.className = o.focus ? "pdfedit-para pdfedit-active" : "pdfedit-para";
     el.contentEditable = "true";
     el.spellcheck = false;
+    el.setAttribute("role", "textbox");
+    el.setAttribute("aria-multiline", "true");
     if (o.html) el.innerHTML = o.html;
     el.style.left = `${vx}px`;
     el.style.top = `${vy}px`;
@@ -1467,6 +1476,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       znum.value = String(p);
       applyZoom(p / 100);
       saveZoomPct(p);
+      live.textContent = `${t("zoom")} ${p}%`;
     };
     zrange.addEventListener("input", () => setZoom(Number(zrange.value)));
     znum.addEventListener("change", () => setZoom(Number(znum.value)));
@@ -1943,6 +1953,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         el.className = "pdfedit-para";
         el.contentEditable = "true";
         el.spellcheck = false;
+        el.setAttribute("role", "textbox");
+        el.setAttribute("aria-multiline", "true");
         el.innerHTML = html || escapeHtml(origText);
         el.style.left = `${left}px`;
         el.style.top = `${top}px`;
