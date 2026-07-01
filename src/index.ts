@@ -1068,13 +1068,18 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     const topBaseline = Math.max(...all.map((i) => i.y));
     const topExtent = topBaseline + size * 0.85;
     const botExtent = Math.min(...all.map((i) => i.y)) - size * 0.15;
-    const tl = viewport.convertToViewportPoint(leftExtent, topExtent);
-    const br = viewport.convertToViewportPoint(rightExtent, botExtent);
-    const left = Math.min(tl[0]!, br[0]!);
-    const top = Math.min(tl[1]!, br[1]!);
-    const wPx = Math.abs(br[0]! - tl[0]!);
-    const hPx = Math.abs(br[1]! - tl[1]!);
-    const { fg, bg } = cctx ? sampleColors(cctx, left, top, wPx, hPx) : { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 } };
+    // Anchor the box at the text's top-right and let it hug its content (max-content in both
+    // axes): vertical-rl fills down-then-left from the top-right, so a content-sized box keeps
+    // edited/long columns inside the focus ring regardless of how the browser's font metrics
+    // differ from the original (which the tight ink extent did not allow for).
+    const tr = viewport.convertToViewportPoint(rightExtent, topExtent);
+    const bl = viewport.convertToViewportPoint(leftExtent, botExtent);
+    const rightPx = Math.max(tr[0]!, bl[0]!);
+    const top = Math.min(tr[1]!, bl[1]!);
+    const sLeft = Math.min(tr[0]!, bl[0]!); // original ink region, for colour sampling
+    const sW = Math.abs(bl[0]! - tr[0]!);
+    const sH = Math.abs(bl[1]! - tr[1]!);
+    const { fg, bg } = cctx ? sampleColors(cctx, sLeft, top, sW, sH) : { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 } };
     const fgHex = rgb255ToHex(fg);
 
     // Build styled spans column by column (right-to-left), glyphs top-to-bottom.
@@ -1126,10 +1131,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     el.contentEditable = "true";
     el.spellcheck = false;
     el.innerHTML = html || escapeHtml(cols.map((c) => c.text).join(""));
-    el.style.left = `${left}px`;
+    el.style.right = `${Math.max(0, viewport.width - rightPx)}px`;
     el.style.top = `${top}px`;
-    el.style.width = `${Math.max(wPx, size * scale)}px`;
-    el.style.height = `${Math.max(hPx, size * scale)}px`;
+    el.style.width = "max-content";
+    el.style.height = "max-content";
     el.style.writingMode = "vertical-rl";
     el.style.fontSize = `${size * scale}px`;
     el.style.lineHeight = `${pitch * scale}px`;
