@@ -45,6 +45,12 @@ export interface PdfEditorOptions {
   onChange?: () => void;
   /** Restore a prior editing session (from getState). Applied after the pages render. */
   initialState?: PdfEditState;
+  /** A Unicode fallback TTF/OTF (bytes, or a lazy async provider) used at export for
+   *  characters neither the original nor the standard fonts can encode, instead of
+   *  dropping them. Loaded once, on the first save that needs it. */
+  fallbackFont?: Uint8Array | (() => Promise<Uint8Array | null>);
+  /** Called when an export had to omit characters no available font could draw. */
+  onWarning?: (message: string) => void;
 }
 export interface PdfEditor {
   getBytes(): Promise<Uint8Array>;
@@ -461,20 +467,21 @@ function sampleRunStats(ctx: CanvasRenderingContext2D, viewport: pdfjsLib.PageVi
   return { fg: s.fg, ink: s.ink };
 }
 
-// Replace characters the standard fonts can't encode so drawText never throws (which
-// would leave an empty cover box). WinAnsi covers Latin-1 + cp1252 punctuation; map the
-// few common typographic glyphs and drop anything else outside that range.
-function sanitizeStd(s: string): string {
+// Map common typographic glyphs onto their WinAnsi equivalents (the standard fonts
+// cover Latin-1 + cp1252 punctuation only).
+function normalizeStd(s: string): string {
   return s
     .replace(/[‘’‚′]/g, "'")
     .replace(/[“”„″]/g, '"')
     .replace(/[–—−]/g, "-")
     .replace(/…/g, "...")
     .replace(/[   ]/g, " ")
-    .replace(/[•]/g, "-")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[^ -ÿ€ŒœŽžŠšŸ]/g, "");
+    .replace(/[•]/g, "-");
 }
+// Characters no standard font can encode; dropping them keeps drawText from throwing
+// (which would leave an empty cover box). The export tries the fallback font first.
+// eslint-disable-next-line no-control-regex
+const STD_DROP_RE = /[^ -ÿ€ŒœŽžŠšŸ]/g;
 
 const norm = (c: RGB): RGB => ({ r: c.r / 255, g: c.g / 255, b: c.b / 255 });
 const variance = (xs: number[]): number => {
@@ -2127,6 +2134,20 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         embedCache.set(key, font);
         return font;
       };
+      // The host-provided Unicode fallback font: embedded once, on first need.
+      let fallbackFont: PDFFont | null | undefined;
+      const getFallback = async (): Promise<PDFFont | null> => {
+        if (fallbackFont !== undefined) return fallbackFont;
+        fallbackFont = null;
+        try {
+          const src = typeof options.fallbackFont === "function" ? await options.fallbackFont() : options.fallbackFont;
+          if (src && src.length) fallbackFont = await pdf.embedFont(src.slice(), { subset: true });
+        } catch (e) {
+          console.warn("[pdfedit] fallback font failed to load", e);
+        }
+        return fallbackFont;
+      };
+      const dropped = { n: 0 }; // characters no available font could draw
       // Whether an embedded font can render every (non-space) char in the text.
       const covers = (font: PDFFont, text: string): boolean => {
         try {
@@ -2175,7 +2196,17 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
             return { font: emb, text: reencoded, faux: run.bold && !embBold };
           }
         }
-        return { font: std, text: sanitizeStd(part), faux: false };
+        // Standard-font path: characters WinAnsi can't encode try the Unicode
+        // fallback font before being dropped (and count what is still lost).
+        const normalized = normalizeStd(part);
+        const clean = normalized.replace(STD_DROP_RE, "");
+        if (clean !== normalized) {
+          const fb = await getFallback();
+          if (fb && covers(fb, part)) return { font: fb, text: part, faux: run.bold };
+          if (fb && covers(fb, normalized)) return { font: fb, text: normalized, faux: run.bold };
+          dropped.n += normalized.length - clean.length;
+        }
+        return { font: std, text: clean, faux: false };
       };
 
       for (const pp of editedParas) {
@@ -2193,7 +2224,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         // original glyphs (font resource + byte code) for unchanged text, substituting only
         // genuinely new characters. Everything else uses the well-tested substitute path.
         if (pp.glyphPreserve) {
-          await drawGlyphPreserving(page, pp, baseRec, getStd);
+          await drawGlyphPreserving(page, pp, baseRec, getStd, getFallback, dropped);
           continue;
         }
         const base = {
@@ -2219,6 +2250,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           console.error("[pdfedit] image embed failed", e);
         }
       }
+      if (dropped.n > 0) {
+        const msg = t("droppedChars").replace("{n}", String(dropped.n));
+        console.warn("[pdfedit] " + msg);
+        options.onWarning?.(msg);
+      }
       return new Uint8Array(await pdf.save());
     },
     destroy() {
@@ -2241,6 +2277,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     pp: Paragraph,
     baseRec: FontRec | undefined,
     getStd: (k: StandardFonts) => Promise<PDFFont>,
+    getFallback: () => Promise<PDFFont | null>,
+    dropped: { n: number },
   ): Promise<void> {
     const bold = baseRec ? baseRec.bold || !!baseRec.synthBold : false;
     const italic = baseRec ? baseRec.italic : false;
@@ -2275,10 +2313,24 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           popGraphicsState(),
         );
       } else if (s.text.trim() !== "") {
+        // Substituted (new) text: standard font, or the Unicode fallback for
+        // characters WinAnsi can't encode; count anything still lost.
+        const normalized = normalizeStd(s.text);
+        const clean = normalized.replace(STD_DROP_RE, "");
+        let font = std;
+        let text = clean;
+        if (clean !== normalized) {
+          const fb = await getFallback();
+          if (fb) {
+            font = fb;
+            text = normalized;
+          } else dropped.n += normalized.length - clean.length;
+        }
+        if (text.trim() === "") continue;
         try {
-          page.drawText(s.text, { x: s.x, y: s.y, size: s.size, font: std, color: rgb(s.color.r, s.color.g, s.color.b) });
+          page.drawText(text, { x: s.x, y: s.y, size: s.size, font, color: rgb(s.color.r, s.color.g, s.color.b) });
         } catch {
-          /* glyph not encodable in the substitute font */
+          dropped.n += text.length; // not encodable even in the chosen font
         }
       }
     }

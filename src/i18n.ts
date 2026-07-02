@@ -32,6 +32,7 @@ const en: Dict = {
   imageBoxAria: "Inserted image. Arrow keys move it, plus and minus resize, Delete removes.",
   dragResize: "Drag to resize",
   deleteImage: "Delete image",
+  droppedChars: "{n} character(s) could not be drawn with the available fonts and were left out of the saved PDF.",
 };
 
 const fr: Dict = {
@@ -60,6 +61,7 @@ const fr: Dict = {
   imageBoxAria: "Image insérée. Les flèches la déplacent, plus et moins la redimensionnent, Suppr la retire.",
   dragResize: "Glisser pour redimensionner",
   deleteImage: "Supprimer l'image",
+  droppedChars: "{n} caractère(s) n'ont pas pu être dessinés avec les polices disponibles et ont été omis du PDF enregistré.",
 };
 
 const LOCALES: Record<string, Dict> = { en, fr };
