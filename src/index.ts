@@ -1507,8 +1507,27 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     change();
   }
 
+  // The page under the middle of the scroll viewport, so inserts land on what
+  // the user is looking at rather than always on page 1.
+  function pageInView(): { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number } | undefined {
+    const rootRect = root.getBoundingClientRect();
+    const centerY = rootRect.top + rootRect.height / 2;
+    let best: (typeof pageEls)[number] | undefined;
+    let bestDist = Infinity;
+    for (const p of pageEls) {
+      const r = p.el.getBoundingClientRect();
+      if (r.top <= centerY && r.bottom >= centerY) return p;
+      const d = Math.min(Math.abs(r.top - centerY), Math.abs(r.bottom - centerY));
+      if (d < bestDist) {
+        bestDist = d;
+        best = p;
+      }
+    }
+    return best;
+  }
+
   async function insertImage(file: File): Promise<void> {
-    const target = pageEls[0];
+    const target = pageInView() ?? pageEls[0];
     if (!target) return;
     addImageBox(new Uint8Array(await file.arrayBuffer()), file.type, target, null, true);
   }
@@ -1664,7 +1683,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     const glyphsForPage = async (pageIndex: number): Promise<PlacedGlyph[]> => {
       if (glyphPdfFailed) return [];
       try {
-        if (!glyphPdf) glyphPdf = await PDFDocument.load(bytes.slice());
+        if (!glyphPdf) glyphPdf = await PDFDocument.load(bytes.slice(), { ignoreEncryption: true });
         return pageGlyphs(glyphPdf, pageIndex);
       } catch {
         glyphPdfFailed = true;
@@ -2072,7 +2091,9 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     async getBytes() {
       const editedParas = paragraphs.filter((p) => p.dirty);
       if (editedParas.length === 0 && images.length === 0) return original.slice();
-      const pdf = await PDFDocument.load(original.slice());
+      // ignoreEncryption: owner-password PDFs (print/copy restricted) render and edit
+      // fine via pdf.js; without it pdf-lib throws here and the user's edits are lost.
+      const pdf = await PDFDocument.load(original.slice(), { ignoreEncryption: true });
       pdf.registerFontkit(fontkit);
       const pages = pdf.getPages();
       const stdCache = new Map<string, PDFFont>();
