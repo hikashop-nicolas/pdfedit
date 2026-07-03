@@ -33,6 +33,7 @@ const en: Dict = {
   dragResize: "Drag to resize",
   deleteImage: "Delete image",
   droppedChars: "{n} character(s) could not be drawn with the available fonts and were left out of the saved PDF.",
+  renderFailed: "This PDF could not be displayed. It may be corrupted or password-protected. Saving returns the file unchanged.",
 };
 
 const fr: Dict = {
@@ -62,6 +63,7 @@ const fr: Dict = {
   dragResize: "Glisser pour redimensionner",
   deleteImage: "Supprimer l'image",
   droppedChars: "{n} caractère(s) n'ont pas pu être dessinés avec les polices disponibles et ont été omis du PDF enregistré.",
+  renderFailed: "Ce PDF n'a pas pu être affiché. Il est peut-être corrompu ou protégé par mot de passe. L'enregistrement renvoie le fichier inchangé.",
 };
 
 const LOCALES: Record<string, Dict> = { en, fr };

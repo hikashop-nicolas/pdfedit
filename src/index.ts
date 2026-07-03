@@ -51,6 +51,8 @@ export interface PdfEditorOptions {
   fallbackFont?: Uint8Array | (() => Promise<Uint8Array | null>);
   /** Called when an export had to omit characters no available font could draw. */
   onWarning?: (message: string) => void;
+  /** Called when the document could not be rendered (corrupt / password-protected). */
+  onError?: (message: string) => void;
 }
 export interface PdfEditor {
   getBytes(): Promise<Uint8Array>;
@@ -205,7 +207,8 @@ function injectStyles(): void {
   s.id = STYLE_ID;
   s.textContent = `
     .pdfedit-wrap { display:flex; flex-direction:column; height:100%; }
-    .pdfedit-live { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); border:0; }
+    .pdfedit-error { background:#7a2b2b; color:#ffd7d7; padding:10px 14px; font:13px/1.5 system-ui,sans-serif; border-radius:6px; margin:10px; }
+.pdfedit-live { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); border:0; }
     .pdfedit-toolbar {
       display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px 10px;
       background:#2b2f36; border-bottom:1px solid #1c1f24; color:#e6e6e6;
@@ -1584,6 +1587,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       change();
     };
     const removeImage = () => {
+      const src = box.querySelector("img")?.src;
+      if (src?.startsWith("blob:")) URL.revokeObjectURL(src);
       box.remove();
       const i = images.indexOf(rec);
       if (i >= 0) images.splice(i, 1);
@@ -1681,8 +1686,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     rec.hPdf = Math.abs(br[1]! - tl[1]!);
   }
 
+  let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
   void (async () => {
-    const doc = await pdfjsLib.getDocument({ data: bytes.slice(), fontExtraProperties: true }).promise;
+    loadingTask = pdfjsLib.getDocument({ data: bytes.slice(), fontExtraProperties: true });
+    const doc = await loadingTask.promise;
     // Lazily parsed (pdf-lib) copy used only to recover original glyph codes for blocks whose
     // fonts have no usable Unicode. Loaded on first need so normal PDFs pay nothing.
     let glyphPdf: PDFDocument | null = null;
@@ -2032,7 +2039,17 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     upgradeOverlayFonts();
     await applyDisplayFonts();
     if (options.initialState) applyState(options.initialState);
-  })().catch((e: unknown) => console.error("[pdfedit] render failed", e));
+  })().catch((e: unknown) => {
+    // A failed render must not leave a silent blank editor: show why, and note that
+    // getBytes still returns the original bytes untouched (no edits can exist).
+    console.error("[pdfedit] render failed", e);
+    const banner = document.createElement("div");
+    banner.className = "pdfedit-error";
+    banner.setAttribute("role", "alert");
+    banner.textContent = t("renderFailed");
+    root.prepend(banner);
+    options.onError?.(t("renderFailed"));
+  });
 
   // Replay a saved session onto the freshly rendered (pristine) pages: re-apply each edited
   // paragraph's content by its render index, then re-add the user's text boxes and images.
@@ -2266,6 +2283,13 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         } catch {
           /* ignore */
         }
+      }
+      // Free the worker-side document; a leaked one keeps all page data alive and
+      // is the main driver of the shared-worker wedging on repeated opens.
+      void loadingTask?.destroy().catch(() => undefined);
+      for (const im of images) {
+        const src = im.el.querySelector("img")?.src;
+        if (src?.startsWith("blob:")) URL.revokeObjectURL(src);
       }
       wrap.remove();
     },
