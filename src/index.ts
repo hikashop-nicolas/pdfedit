@@ -703,6 +703,9 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   live.className = "pdfedit-live";
   live.setAttribute("aria-live", "polite");
   const pageEls: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number }[] = [];
+  // Lazy rendering: one promise per page (render starts on first need) + the observer.
+  const pageRenders: (Promise<void> | null)[] = [];
+  let pageObserver: IntersectionObserver | null = null;
   let displayZoom = loadZoomPct() / 100; // visual zoom only (persisted); render scale + PDF coords unchanged
   const applyZoom = (z: number) => {
     // Anchor the page under the viewport centre so it stays put across the zoom change;
@@ -885,9 +888,9 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     const donor = rec.baseName ? findDonor(rec.baseName, (r) => !!r.cssName) : undefined;
     return donor?.[1].cssName;
   };
-  const upgradeOverlayFonts = () => {
+  const upgradeOverlayFonts = (paras: Paragraph[] = paragraphs) => {
     detectSynthBold();
-    for (const para of paragraphs) {
+    for (const para of paras) {
       // Block element (covers stray / newly-typed text) gets the dominant font's face.
       const baseRec = fontRecs.get(para.baseFontKey);
       const baseFace = baseRec ? faceFor(baseRec) : undefined;
@@ -924,6 +927,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       return;
     }
     for (const [fontName, cmap] of displayFontChars) {
+      if (displayFamilies.has(fontName)) continue; // built on an earlier page render
       const rec = fontRecs.get(fontName);
       if (!rec?.data || !cmap.size) continue;
       const family = `pdfedit_disp_${uid}_${fontName.replace(/[^a-zA-Z0-9_]/g, "")}`;
@@ -946,8 +950,12 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     }
     for (const para of paragraphs) {
       para.el.querySelectorAll<HTMLElement>("span[data-font]").forEach((span) => {
+        if (span.dataset.dispDone) return; // already styled on an earlier pass
         const fam = span.dataset.font ? displayFamilies.get(span.dataset.font) : undefined;
-        if (fam) span.style.fontFamily = `'${fam}', ${span.style.fontFamily}`;
+        if (fam) {
+          span.style.fontFamily = `'${fam}', ${span.style.fontFamily}`;
+          span.dataset.dispDone = "1";
+        }
       });
     }
   };
@@ -1704,32 +1712,48 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         return [];
       }
     };
-    for (let p = 1; p <= doc.numPages && !destroyed; p++) {
-      const page = await doc.getPage(p);
+    // First pass: create every page's sized shell up front; the heavy content
+    // (canvas render + text overlays) loads lazily as pages approach the viewport.
+    const pageData: { page: pdfjsLib.PDFPageProxy; el: HTMLElement; viewport: pdfjsLib.PageViewport }[] = [];
+    for (let p0 = 1; p0 <= doc.numPages && !destroyed; p0++) {
+      const page = await doc.getPage(p0);
       const viewport = page.getViewport({ scale });
-      const pageW = page.getViewport({ scale: 1 }).width;
       const pageEl = document.createElement("div");
       pageEl.className = "pdfedit-page";
       pageEl.style.width = `${viewport.width}px`;
       pageEl.style.height = `${viewport.height}px`;
       pageEl.style.zoom = String(displayZoom);
+      pageEls.push({ el: pageEl, viewport, index: p0 - 1 });
+      // Double-click a blank spot (not on existing text or an image) to add a text box there.
+      const pageIndex = p0 - 1;
+      const pageViewport = viewport;
+      const thisPageEl = pageEl;
+      pageEl.addEventListener("dblclick", (e) => {
+        const t2 = e.target as HTMLElement;
+        if (t2.closest(".pdfedit-para") || t2.closest(".pdfedit-img")) return;
+        addTextAt(thisPageEl, pageViewport, pageIndex, e.clientX, e.clientY);
+      });
+      root.appendChild(pageEl);
+      pageData.push({ page, el: pageEl, viewport });
+    }
+    const renderPage = (idx: number): Promise<void> =>
+      (pageRenders[idx] ??= (async () => {
+      const pd = pageData[idx];
+      if (!pd || destroyed) return;
+      const { page, el: pageEl, viewport } = pd;
+      const p = idx + 1;
+      const pageIndex = idx;
+      void p;
+      void pageIndex;
+      const pageW = page.getViewport({ scale: 1 }).width;
+      const parasBefore = paragraphs.length;
       const canvas = document.createElement("canvas");
       canvas.width = Math.floor(viewport.width);
       canvas.height = Math.floor(viewport.height);
       canvas.setAttribute("aria-hidden", "true"); // visual render; the text is in the overlay
       const cctx = canvas.getContext("2d");
       if (cctx) await page.render({ canvasContext: cctx, viewport, canvas }).promise;
-      pageEl.appendChild(canvas);
-      pageEls.push({ el: pageEl, viewport, index: p - 1 });
-      // Double-click a blank spot (not on existing text or an image) to add a text box there.
-      const pageIndex = p - 1;
-      const pageViewport = viewport;
-      const thisPageEl = pageEl;
-      pageEl.addEventListener("dblclick", (e) => {
-        const t = e.target as HTMLElement;
-        if (t.closest(".pdfedit-para") || t.closest(".pdfedit-img")) return;
-        addTextAt(thisPageEl, pageViewport, pageIndex, e.clientX, e.clientY);
-      });
+      pageEl.insertBefore(canvas, pageEl.firstChild); // under any boxes added before the render
 
       const content = await page.getTextContent();
       const allItems: RunItem[] = [];
@@ -1847,8 +1871,9 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const visible = items.filter((it) => !it.invisible);
       if (detectVertical(visible)) {
         for (const cols of buildVerticalBlocks(visible)) renderVerticalBlock(cols, p - 1, page, viewport, cctx, pageEl);
-        root.appendChild(pageEl);
-        continue;
+        upgradeOverlayFonts(paragraphs.slice(parasBefore));
+        await applyDisplayFonts();
+        return; // the page shell is already attached
       }
       for (const lines of buildParagraphs(visible, bgOf)) {
         const first = lines[0]!;
@@ -2034,11 +2059,31 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         pageEl.appendChild(el);
         paragraphs.push(para);
       }
-      root.appendChild(pageEl);
+      upgradeOverlayFonts(paragraphs.slice(parasBefore));
+      await applyDisplayFonts();
+      })());
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const en of entries) {
+          if (!en.isIntersecting) continue;
+          const i = pageEls.findIndex((pe) => pe.el === en.target);
+          if (i >= 0) void renderPage(i).catch((e) => console.error("[pdfedit] page render failed", e));
+        }
+      },
+      { root, rootMargin: "1200px 0px" },
+    );
+    for (const pd of pageData) io.observe(pd.el);
+    pageObserver = io;
+    if (options.initialState) {
+      // Restoring a session needs its edited pages' overlays in place first.
+      const st = options.initialState;
+      const needed = new Set<number>();
+      for (const e2 of st.edits) needed.add(e2.page);
+      for (const b of st.boxes) needed.add(b.page);
+      for (const im of st.images) needed.add(im.page);
+      await Promise.all([...needed].map((i) => renderPage(i)));
+      applyState(st);
     }
-    upgradeOverlayFonts();
-    await applyDisplayFonts();
-    if (options.initialState) applyState(options.initialState);
   })().catch((e: unknown) => {
     // A failed render must not leave a silent blank editor: show why, and note that
     // getBytes still returns the original bytes untouched (no edits can exist).
@@ -2054,10 +2099,21 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   // Replay a saved session onto the freshly rendered (pristine) pages: re-apply each edited
   // paragraph's content by its render index, then re-add the user's text boxes and images.
   function applyState(st: PdfEditState): void {
-    const rendered = paragraphs.filter((p) => !p.isNew);
+    // Edits are matched by their index among the page's own paragraphs (stable
+    // regardless of which pages have rendered).
+    const byPage = new Map<number, Paragraph[]>();
+    for (const p of paragraphs) {
+      if (p.isNew) continue;
+      let list = byPage.get(p.page);
+      if (!list) {
+        list = [];
+        byPage.set(p.page, list);
+      }
+      list.push(p);
+    }
     for (const e of st.edits) {
-      const para = rendered[e.index];
-      if (para && para.page === e.page) {
+      const para = byPage.get(e.page)?.[e.index];
+      if (para) {
         para.el.innerHTML = e.html;
         para.dirty = true;
         para.el.classList.add("pdfedit-edited");
@@ -2084,11 +2140,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       return images.length > 0 || paragraphs.some((p) => p.dirty);
     },
     getState(): PdfEditState {
-      const rendered = paragraphs.filter((p) => !p.isNew);
       const edits: PdfParagraphEdit[] = [];
-      rendered.forEach((p, index) => {
+      const perPage = new Map<number, number>();
+      for (const p of paragraphs) {
+        if (p.isNew) continue;
+        const index = perPage.get(p.page) ?? 0;
+        perPage.set(p.page, index + 1);
         if (p.dirty) edits.push({ page: p.page, index, html: p.el.innerHTML });
-      });
+      }
       const boxes: PdfBoxState[] = paragraphs
         .filter((p) => p.isNew)
         .map((p) => ({
@@ -2284,6 +2343,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           /* ignore */
         }
       }
+      pageObserver?.disconnect();
       // Free the worker-side document; a leaked one keeps all page data alive and
       // is the main driver of the shared-worker wedging on repeated opens.
       void loadingTask?.destroy().catch(() => undefined);
