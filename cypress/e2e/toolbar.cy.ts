@@ -199,6 +199,79 @@ describe("pdfedit toolbar", () => {
     });
   });
 
+  it("undoes and redoes typing via the toolbar buttons", () => {
+    openFixture();
+    cy.get(".pdfedit-para").first().click().type("{moveToEnd} ZZUNDO");
+    cy.get("#editor").should("contain.text", "ZZUNDO");
+    // The whole typing run is one step: a single undo removes it and clears dirty.
+    cy.get('.pdfedit-toolbar [aria-label="Undo (Ctrl+Z)"]').click();
+    cy.get("#editor").should("not.contain.text", "ZZUNDO");
+    cy.get(".pdfedit-para.pdfedit-edited").should("not.exist");
+    cy.get('.pdfedit-toolbar [aria-label="Redo (Ctrl+Y)"]').click();
+    cy.get("#editor").should("contain.text", "ZZUNDO");
+    cy.get(".pdfedit-para.pdfedit-edited").should("exist");
+  });
+
+  it("undoes typing with Ctrl+Z inside the paragraph", () => {
+    openFixture();
+    cy.get(".pdfedit-para").first().click().type("{moveToEnd} ZZKEYS");
+    cy.get("#editor").should("contain.text", "ZZKEYS");
+    cy.get(".pdfedit-para").first().type("{ctrl}z");
+    cy.get("#editor").should("not.contain.text", "ZZKEYS");
+    cy.get(".pdfedit-para").first().type("{ctrl}y");
+    cy.get("#editor").should("contain.text", "ZZKEYS");
+  });
+
+  it("undoes a styling change applied through the Range-surgery path", () => {
+    openFixture();
+    selectInFirstPara(0, 6);
+    cy.get(".pdfedit-toolbar input[type=color]").invoke("val", "#cc0000").trigger("change");
+    cy.window().then((win) => {
+      const para = win.document.querySelector<HTMLElement>(".pdfedit-para")!;
+      const reds = [...para.querySelectorAll("span")].filter((s) => getComputedStyle(s).color === "rgb(204, 0, 0)");
+      expect(reds.length, "a span turned red").to.be.greaterThan(0);
+    });
+    cy.get('.pdfedit-toolbar [aria-label="Undo (Ctrl+Z)"]').click();
+    cy.window().then((win) => {
+      const para = win.document.querySelector<HTMLElement>(".pdfedit-para")!;
+      const reds = [...para.querySelectorAll("span")].filter((s) => getComputedStyle(s).color === "rgb(204, 0, 0)");
+      expect(reds.length, "the red span is gone after undo").to.eq(0);
+    });
+    cy.get(".pdfedit-para.pdfedit-edited").should("not.exist");
+  });
+
+  it("undoes an image insertion and a keyboard move as separate steps", () => {
+    openFixture();
+    cy.get('input[type=file][accept*="image"]').selectFile("cypress/fixtures/img.png", { force: true });
+    cy.get(".pdfedit-img").should("exist");
+    // A run of arrow presses coalesces into one step.
+    cy.get(".pdfedit-img").focus().trigger("keydown", { key: "ArrowRight" }).trigger("keydown", { key: "ArrowRight" });
+    cy.get(".pdfedit-img").should(($b) => expect(parseFloat($b[0].style.left)).to.eq(50));
+    cy.get('.pdfedit-toolbar [aria-label="Undo (Ctrl+Z)"]').click();
+    cy.get(".pdfedit-img").should(($b) => expect(parseFloat($b[0].style.left)).to.eq(40));
+    cy.get('.pdfedit-toolbar [aria-label="Undo (Ctrl+Z)"]').click();
+    cy.get(".pdfedit-img").should("not.exist");
+    cy.get('.pdfedit-toolbar [aria-label="Redo (Ctrl+Y)"]').click();
+    cy.get(".pdfedit-img").should("exist").and(($b) => expect(parseFloat($b[0].style.left)).to.eq(40));
+  });
+
+  it("undoes a text box added in blank space back to nothing", () => {
+    openFixture();
+    cy.get(".pdfedit-page")
+      .first()
+      .then(($p) => {
+        const r = $p[0]!.getBoundingClientRect();
+        cy.wrap($p).dblclick(r.width * 0.3, r.height * 0.45, { force: true });
+      });
+    cy.get(".pdfedit-para.pdfedit-active").should("exist");
+    cy.focused().type("ZZBOX");
+    // Two steps: the typed content, then the box creation itself.
+    cy.get('.pdfedit-toolbar [aria-label="Undo (Ctrl+Z)"]').click();
+    cy.get("#editor").should("not.contain.text", "ZZBOX");
+    cy.get('.pdfedit-toolbar [aria-label="Undo (Ctrl+Z)"]').click();
+    cy.get(".pdfedit-para").each(($el) => expect($el.text()).to.not.contain("ZZBOX"));
+  });
+
   it("restores an editing session from saved state (re-render pristine + replay edits)", () => {
     openFixture();
     // Append a marker to the first paragraph (keeps the original text too).

@@ -23,6 +23,7 @@ import { type PlacedGlyph } from "./content-stream";
 import { type Anchor, planEditedBlock } from "./glyph-edit";
 import { pageGlyphs } from "./pdf-glyphs";
 import { detectVertical, buildVerticalBlocks, layoutVerticalGlyphs, type VCol } from "./vertical";
+import { SnapHistory } from "./history";
 import { t } from "./i18n";
 
 // pdfedit: a standalone, framework-agnostic PDF editor.
@@ -61,6 +62,11 @@ export interface PdfEditor {
    *  on top. Restoring re-renders the original and replays the edits (lossless, unlike
    *  re-opening an exported PDF), which is what a version-history tool should snapshot. */
   getState(): PdfEditState;
+  /** Document-level undo/redo across typing, styling, alignment, boxes and images. */
+  undo(): void;
+  redo(): void;
+  canUndo(): boolean;
+  canRedo(): boolean;
   destroy(): void;
 }
 
@@ -69,6 +75,7 @@ export interface PdfParagraphEdit {
   page: number;
   index: number;
   html: string;
+  align?: Align;
 }
 /** A text box the user added in blank space. */
 export interface PdfBoxState {
@@ -163,6 +170,11 @@ interface Paragraph {
   glyphPreserve: boolean;
   /** Added by the user in blank space (no original content to cover / preserve). */
   isNew?: boolean;
+  /** Stable per-instance identity for undo snapshots (assigned in wirePara). */
+  uid?: number;
+  /** Pristine overlay HTML/alignment, captured while clean, for undo back to unedited. */
+  origHtml?: string;
+  origAlign?: Align;
   /** Tategaki block: glyphs flow top-to-bottom, columns right-to-left. */
   vertical?: boolean;
   vStartX?: number; // rightmost column's glyph-origin x (draw start)
@@ -179,6 +191,8 @@ interface ImageItem {
   wPdf: number;
   hPdf: number;
   el: HTMLElement;
+  /** Stable per-instance identity for undo snapshots. */
+  uid?: number;
 }
 /** A styled text run parsed from a paragraph block on export. */
 interface StyledRun {
@@ -194,6 +208,8 @@ interface StyledRun {
 }
 
 const ICON = {
+  undo: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h7a3.5 3.5 0 0 1 0 7H6"/><path d="M6 4 3 7l3 3"/></svg>`,
+  redo: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 7H6a3.5 3.5 0 0 0 0 7h4"/><path d="M10 4l3 3-3 3"/></svg>`,
   left: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M2 6.8h8M2 10.1h11M2 13.4h6"/></svg>`,
   center: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M4 6.8h8M3 10.1h10M5 13.4h6"/></svg>`,
   right: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M6 6.8h8M3 10.1h11M8 13.4h6"/></svg>`,
@@ -736,6 +752,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     }
   };
   let destroyed = false;
+  let restoring = false; // an undo/redo snapshot is being applied
   let activePara: Paragraph | null = null;
   let savedPara: Paragraph | null = null;
   let savedRange: Range | null = null;
@@ -746,6 +763,58 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       activePara.el.classList.add("pdfedit-edited");
     }
     change();
+    history.commit(null);
+  };
+
+  // --- undo/redo ---------------------------------------------------------------
+  // Snapshots mirror getState()'s {edits, boxes, images} shape (minus the original
+  // bytes) plus stable uids so restore can diff instead of rebuilding everything.
+  interface UndoEdit { page: number; index: number; html: string; align: Align }
+  interface UndoBox {
+    uid: number; page: number; xPdf: number; yPdf: number; wPdf: number;
+    size: number; align: Align; family: Family; colorHex: string; html: string;
+  }
+  interface UndoImg { uid: number; page: number; bytes: Uint8Array; mime: string; leftPx: number; topPx: number; widthPx: number }
+  interface UndoSnap { edits: UndoEdit[]; boxes: UndoBox[]; imgs: UndoImg[] }
+  let paraSeq = 0;
+  let imgSeq = 0;
+
+  function takeSnapshot(): UndoSnap {
+    const edits: UndoEdit[] = [];
+    const perPage = new Map<number, number>();
+    for (const p of paragraphs) {
+      if (p.isNew) continue;
+      const index = perPage.get(p.page) ?? 0;
+      perPage.set(p.page, index + 1);
+      if (p.dirty) edits.push({ page: p.page, index, html: p.el.innerHTML, align: p.align });
+    }
+    const boxes: UndoBox[] = paragraphs
+      .filter((p) => p.isNew)
+      .map((p) => ({
+        uid: p.uid ?? 0, page: p.page, xPdf: p.x, yPdf: p.topY, wPdf: p.w, size: p.size,
+        align: p.align, family: p.family,
+        colorHex: rgb255ToHex({ r: p.color.r * 255, g: p.color.g * 255, b: p.color.b * 255 }),
+        html: p.el.innerHTML,
+      }));
+    const imgs: UndoImg[] = images.map((im) => ({
+      uid: im.uid ?? 0, page: im.page, bytes: im.bytes, mime: im.mime,
+      leftPx: parseFloat(im.el.style.left) || 0,
+      topPx: parseFloat(im.el.style.top) || 0,
+      widthPx: im.el.offsetWidth || parseFloat(im.el.style.width) || 0,
+    }));
+    return { edits, boxes, imgs };
+  }
+  const snapSig = (s: UndoSnap): string =>
+    JSON.stringify({ e: s.edits, b: s.boxes, i: s.imgs.map(({ bytes: _b, ...rest }) => rest) });
+  const history = new SnapHistory(takeSnapshot, snapSig);
+
+  // Capture a paragraph's pristine overlay content while it is still clean, so undo
+  // can take it back to unedited (and clear its dirty flag) later.
+  const rememberPristine = (p: Paragraph | null): void => {
+    if (p && !p.dirty && !p.isNew) {
+      p.origHtml = p.el.innerHTML;
+      p.origAlign = p.align;
+    }
   };
 
   // Per-instance font registry: bold/italic/family plus the original embedded font
@@ -1032,8 +1101,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   // Attach the editing behaviour (active state, selection retention, dirty tracking) to a
   // paragraph's element. Used for both extracted paragraphs and ones added in blank space.
   const wirePara = (para: Paragraph): void => {
+    if (para.uid == null) para.uid = ++paraSeq;
     const el = para.el;
     el.addEventListener("focus", () => {
+      rememberPristine(para);
+      history.breakRun();
       activePara = para;
       savedPara = para;
       // Keep this paragraph active (border + visible overlay) even when focus moves to a
@@ -1043,6 +1115,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       toolbar.update({ sizePt: para.size, family: para.family });
     });
     el.addEventListener("blur", (e) => {
+      history.breakRun();
       const to = (e as FocusEvent).relatedTarget as Node | null;
       if (to && toolbar.el.contains(to)) {
         showSavedHighlight();
@@ -1051,18 +1124,23 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       el.classList.remove("pdfedit-active");
       clearHighlight();
       // A box added in blank space but left empty is discarded (so a stray add leaves nothing).
-      if (para.isNew && (el.textContent ?? "").trim() === "") {
+      // Not while a snapshot restore runs: removing a focused box fires this blur reentrantly,
+      // and the restore is the sole owner of box add/remove decisions at that point.
+      if (!restoring && para.isNew && (el.textContent ?? "").trim() === "") {
         el.remove();
         const i = paragraphs.indexOf(para);
         if (i >= 0) paragraphs.splice(i, 1);
         if (activePara === para) activePara = null;
         if (savedPara === para) savedPara = null;
+        history.commit(null);
       }
     });
+    el.addEventListener("beforeinput", () => rememberPristine(para));
     el.addEventListener("input", () => {
       para.dirty = true;
       el.classList.add("pdfedit-edited");
       change();
+      history.commit("t:" + para.uid);
     });
   };
 
@@ -1272,6 +1350,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     const vy = (clientY - rect.top) / displayZoom;
     const [pdfX, pdfY] = viewport.convertToPdfPoint(vx, vy);
     createTextBox(pageEl, viewport, pageIndex, { pdfX, pdfY, focus: true });
+    history.commit(null); // box creation is an undoable step of its own
   };
 
   const onSelChange = () => {
@@ -1313,6 +1392,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     const applyStyle = (cssProp: string, value: string) => {
       const range = savedRange;
       if (!range || range.collapsed) return;
+      rememberPristine(savedPara);
       const span = document.createElement("span");
       span.style.setProperty(cssProp, value);
       try {
@@ -1333,11 +1413,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       }
       showSavedHighlight(); // keep the (now styled) selection visible while a control has focus
       change();
+      history.commit(null);
     };
     // Restore the saved paragraph selection, run the styling op, mark dirty. Used by the
     // execCommand-based controls (bold/italic/link), which need the live selection.
     const withSel = (fn: () => void) => {
+      history.breakRun(); // the op is its own undo step, not part of a typing run
       if (savedPara) {
+        rememberPristine(savedPara);
         savedPara.el.focus();
         if (savedRange) {
           const s = document.getSelection();
@@ -1385,6 +1468,25 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       keepSel(b);
       return b;
     };
+    // Undo/redo drive the document-level history directly (NOT through withSel,
+    // which would refocus/re-select and mark the saved paragraph dirty).
+    const plainIconBtn = (svg: string, title: string, fn: () => void) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.innerHTML = svg;
+      b.title = title;
+      b.setAttribute("aria-label", title);
+      b.firstElementChild?.setAttribute("aria-hidden", "true");
+      b.addEventListener("click", fn);
+      keepSel(b);
+      return b;
+    };
+    el.append(
+      plainIconBtn(ICON.undo, t("undo"), () => doUndo()),
+      plainIconBtn(ICON.redo, t("redo"), () => doRedo()),
+      sep(),
+    );
+
     const boldBtn = toggleBtn("B", t("bold"), "font-weight:bold", "bold");
     const italBtn = toggleBtn("I", t("italic"), "font-style:italic", "italic");
     el.append(boldBtn, italBtn);
@@ -1518,11 +1620,13 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
 
   function setAlign(a: Align): void {
     if (!activePara) return;
+    rememberPristine(activePara);
     activePara.align = a;
     activePara.el.style.textAlign = a;
     activePara.dirty = true;
     activePara.el.classList.add("pdfedit-edited");
     change();
+    history.commit(null);
   }
 
   // The page under the middle of the scroll viewport, so inserts land on what
@@ -1558,7 +1662,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     target: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number },
     place: { leftPx: number; topPx: number; widthPx: number } | null,
     focus: boolean,
-  ): void {
+  ): ImageItem {
     const box = document.createElement("div");
     box.className = "pdfedit-img";
     box.tabIndex = 0; // keyboard focusable
@@ -1583,7 +1687,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     del.setAttribute("aria-label", t("deleteImage"));
     box.append(img, handle, del);
     target.el.appendChild(box);
-    const rec: ImageItem = { page: target.index, bytes: bytesImg, mime, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box };
+    const rec: ImageItem = { page: target.index, bytes: bytesImg, mime, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box, uid: ++imgSeq };
     images.push(rec);
     img.addEventListener("load", () => updateImageRect(rec, target.viewport), { once: true });
     makeDraggable(box);
@@ -1601,15 +1705,18 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const i = images.indexOf(rec);
       if (i >= 0) images.splice(i, 1);
       change();
+      history.commit(null);
     };
     const moveBy = (dx: number, dy: number) => {
       box.style.left = `${parseFloat(box.style.left) + dx}px`;
       box.style.top = `${parseFloat(box.style.top) + dy}px`;
       sync();
+      history.commit("imv:" + rec.uid); // a run of arrow presses undoes as one step
     };
     const resizeBy = (dw: number) => {
       box.style.width = `${Math.max(20, box.offsetWidth + dw)}px`; // height auto keeps aspect
       sync();
+      history.commit("imr:" + rec.uid);
     };
     del.addEventListener("pointerdown", (e) => e.stopPropagation());
     del.addEventListener("click", (e) => {
@@ -1631,6 +1738,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     });
     if (focus) box.focus(); // newly inserted image gets focus so it can be positioned by keyboard
     change();
+    if (focus) history.commit(null); // user insert; session/undo restores commit themselves
+    return rec;
   }
 
   const pageViewportOf = (el: HTMLElement) => pageEls.find((p) => p.el === el.parentElement)?.viewport;
@@ -1654,6 +1763,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const vp = pageViewportOf(box);
         if (rec && vp) updateImageRect(rec, vp);
         change();
+        history.commit(null);
       };
       document.addEventListener("pointermove", move);
       document.addEventListener("pointerup", up);
@@ -1675,6 +1785,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const vp = pageViewportOf(box);
         if (vp) updateImageRect(rec, vp);
         change();
+        history.commit(null);
       };
       document.addEventListener("pointermove", move);
       document.addEventListener("pointerup", up);
@@ -2083,6 +2194,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       for (const im of st.images) needed.add(im.page);
       await Promise.all([...needed].map((i) => renderPage(i)));
       applyState(st);
+      history.reset(); // the restored session is the undo baseline, not an undoable step
     }
   })().catch((e: unknown) => {
     // A failed render must not leave a silent blank editor: show why, and note that
@@ -2117,6 +2229,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         para.el.innerHTML = e.html;
         para.dirty = true;
         para.el.classList.add("pdfedit-edited");
+        if (e.align) {
+          para.align = e.align;
+          para.el.style.textAlign = e.align;
+        }
       }
     }
     for (const b of st.boxes) {
@@ -2135,6 +2251,153 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     if (st.edits.length || st.boxes.length || st.images.length) options.onChange?.();
   }
 
+  // Re-apply an undo snapshot by diffing it against the live state: paragraphs revert
+  // to their pristine capture or take the snapshot's html, boxes and images are
+  // matched by uid (kept in place, updated, removed or recreated).
+  function applySnapshot(st: UndoSnap): void {
+    restoring = true;
+    try {
+      applySnapshotInner(st);
+    } finally {
+      restoring = false;
+    }
+    change();
+  }
+
+  function applySnapshotInner(st: UndoSnap): void {
+    let focusEl: HTMLElement | null = null;
+    const editByKey = new Map<string, UndoEdit>();
+    for (const e of st.edits) editByKey.set(e.page + ":" + e.index, e);
+    const perPage = new Map<number, number>();
+    for (const p of paragraphs) {
+      if (p.isNew) continue;
+      const index = perPage.get(p.page) ?? 0;
+      perPage.set(p.page, index + 1);
+      const e = editByKey.get(p.page + ":" + index);
+      if (e) {
+        if (p.el.innerHTML !== e.html) {
+          p.el.innerHTML = e.html;
+          focusEl = p.el;
+        }
+        if (p.align !== e.align) {
+          p.align = e.align;
+          p.el.style.textAlign = e.align;
+        }
+        p.dirty = true;
+        p.el.classList.add("pdfedit-edited");
+      } else if (p.dirty) {
+        p.el.innerHTML = p.origHtml ?? escapeHtml(p.origText);
+        if (p.origAlign && p.align !== p.origAlign) {
+          p.align = p.origAlign;
+          p.el.style.textAlign = p.origAlign;
+        }
+        p.dirty = false;
+        p.el.classList.remove("pdfedit-edited");
+        focusEl = p.el;
+      }
+    }
+    const wantBoxes = new Map(st.boxes.map((b) => [b.uid, b]));
+    for (const p of [...paragraphs]) {
+      if (!p.isNew) continue;
+      const b = wantBoxes.get(p.uid ?? -1);
+      if (!b) {
+        p.el.remove();
+        const i = paragraphs.indexOf(p);
+        if (i >= 0) paragraphs.splice(i, 1);
+        if (activePara === p) activePara = null;
+        if (savedPara === p) {
+          savedPara = null;
+          savedRange = null;
+        }
+      } else {
+        if (p.el.innerHTML !== b.html) {
+          p.el.innerHTML = b.html;
+          focusEl = p.el;
+        }
+        if (p.align !== b.align) {
+          p.align = b.align;
+          p.el.style.textAlign = b.align;
+        }
+        p.dirty = b.html !== "";
+        p.el.classList.toggle("pdfedit-edited", p.dirty);
+        wantBoxes.delete(p.uid ?? -1);
+      }
+    }
+    for (const b of wantBoxes.values()) {
+      const target = pageEls.find((pe) => pe.index === b.page);
+      if (!target) continue;
+      const p = createTextBox(target.el, target.viewport, b.page, {
+        pdfX: b.xPdf, pdfY: b.yPdf, wPdf: b.wPdf, size: b.size,
+        align: b.align, family: b.family, colorHex: b.colorHex, html: b.html,
+      });
+      p.uid = b.uid;
+      focusEl = p.el;
+    }
+    const wantImgs = new Map(st.imgs.map((i) => [i.uid, i]));
+    for (const im of [...images]) {
+      const w = wantImgs.get(im.uid ?? -1);
+      if (!w) {
+        const src = im.el.querySelector("img")?.src;
+        if (src?.startsWith("blob:")) URL.revokeObjectURL(src);
+        im.el.remove();
+        const i = images.indexOf(im);
+        if (i >= 0) images.splice(i, 1);
+      } else {
+        im.el.style.left = `${w.leftPx}px`;
+        im.el.style.top = `${w.topPx}px`;
+        im.el.style.width = `${w.widthPx}px`;
+        const vp = pageViewportOf(im.el);
+        if (vp) updateImageRect(im, vp);
+        wantImgs.delete(im.uid ?? -1);
+      }
+    }
+    for (const w of wantImgs.values()) {
+      const target = pageEls.find((pe) => pe.index === w.page);
+      if (!target) continue;
+      const rec = addImageBox(w.bytes, w.mime, target, { leftPx: w.leftPx, topPx: w.topPx, widthPx: w.widthPx }, false);
+      rec.uid = w.uid;
+    }
+    // Put the caret at the end of the last text container the restore touched.
+    if (focusEl) {
+      focusEl.focus();
+      const sel = document.getSelection();
+      if (sel) {
+        const r = document.createRange();
+        r.selectNodeContents(focusEl);
+        r.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
+    }
+  }
+
+  function doUndo(): void {
+    const s = history.undo();
+    if (s) applySnapshot(s);
+  }
+  function doRedo(): void {
+    const s = history.redo();
+    if (s) applySnapshot(s);
+  }
+
+  // Document-level undo/redo shortcuts. preventDefault also suppresses the browser's
+  // native contenteditable undo inside overlays, which only ever covered typing and
+  // execCommand ops and desynced from styling/box/image changes.
+  const onUndoKeys = (e: KeyboardEvent) => {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+    const k = e.key.toLowerCase();
+    const isUndo = k === "z" && !e.shiftKey;
+    const isRedo = (k === "z" && e.shiftKey) || k === "y";
+    if (!isUndo && !isRedo) return;
+    const tgt = e.target as HTMLElement | null;
+    if (!tgt || !wrap.contains(tgt)) return;
+    if (tgt.tagName === "INPUT" || tgt.tagName === "SELECT" || tgt.tagName === "TEXTAREA") return; // toolbar fields keep native undo
+    e.preventDefault();
+    if (isUndo) doUndo();
+    else doRedo();
+  };
+  document.addEventListener("keydown", onUndoKeys);
+
   return {
     isDirty() {
       return images.length > 0 || paragraphs.some((p) => p.dirty);
@@ -2146,7 +2409,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         if (p.isNew) continue;
         const index = perPage.get(p.page) ?? 0;
         perPage.set(p.page, index + 1);
-        if (p.dirty) edits.push({ page: p.page, index, html: p.el.innerHTML });
+        if (p.dirty) edits.push({ page: p.page, index, html: p.el.innerHTML, align: p.align });
       }
       const boxes: PdfBoxState[] = paragraphs
         .filter((p) => p.isNew)
@@ -2170,6 +2433,18 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         widthPx: im.el.offsetWidth || parseFloat(im.el.style.width) || 0,
       }));
       return { original: original.slice(), edits, boxes, images: imgs };
+    },
+    undo() {
+      doUndo();
+    },
+    redo() {
+      doRedo();
+    },
+    canUndo() {
+      return history.canUndo;
+    },
+    canRedo() {
+      return history.canRedo;
     },
     async getBytes() {
       const editedParas = paragraphs.filter((p) => p.dirty);
@@ -2336,6 +2611,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     destroy() {
       destroyed = true;
       document.removeEventListener("selectionchange", onSelChange);
+      document.removeEventListener("keydown", onUndoKeys);
       for (const ff of faces.values()) {
         try {
           document.fonts.delete(ff);

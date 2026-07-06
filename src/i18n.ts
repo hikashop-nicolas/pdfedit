@@ -8,6 +8,8 @@ type Dict = Record<string, string>;
 
 const en: Dict = {
   toolbar: "PDF editor tools",
+  undo: "Undo (Ctrl+Z)",
+  redo: "Redo (Ctrl+Y)",
   bold: "Bold",
   italic: "Italic",
   textColor: "Text color",
@@ -38,6 +40,8 @@ const en: Dict = {
 
 const fr: Dict = {
   toolbar: "Outils d'édition PDF",
+  undo: "Annuler (Ctrl+Z)",
+  redo: "Rétablir (Ctrl+Y)",
   bold: "Gras",
   italic: "Italique",
   textColor: "Couleur du texte",

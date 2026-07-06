@@ -16,6 +16,8 @@ describe("pdfedit accessibility", () => {
     openFixture();
     cy.get(".pdfedit-toolbar").should("have.attr", "role", "toolbar").and("have.attr", "aria-label");
     const names = [
+      "Undo (Ctrl+Z)",
+      "Redo (Ctrl+Y)",
       "Bold",
       "Italic",
       "Text color",
