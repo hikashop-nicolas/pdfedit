@@ -70,7 +70,39 @@ const fr: Dict = {
   renderFailed: "Ce PDF n'a pas pu être affiché. Il est peut-être corrompu ou protégé par mot de passe. L'enregistrement renvoie le fichier inchangé.",
 };
 
-const LOCALES: Record<string, Dict> = { en, fr };
+const ja: Dict = {
+  toolbar: "PDF 編集ツール",
+  undo: "元に戻す (Ctrl+Z)",
+  redo: "やり直し (Ctrl+Y)",
+  bold: "太字",
+  italic: "斜体",
+  textColor: "文字の色",
+  font: "フォント",
+  fontFamily: "フォントの種類",
+  fontSize: "フォントサイズ (pt)",
+  fontSizeAria: "フォントサイズ（ポイント）",
+  alignLeft: "左揃え",
+  alignCenter: "中央揃え",
+  alignRight: "右揃え",
+  justify: "両端揃え",
+  link: "リンク",
+  linkTitle: "リンクの追加/編集",
+  linkAria: "リンクの追加または編集",
+  linkPrompt: "リンク URL（空欄で削除）：",
+  image: "画像",
+  insertImage: "画像の挿入",
+  zoom: "ズーム",
+  zoomLevelAria: "ズームレベル（パーセント）",
+  zoomPctTitle: "ズーム (%)",
+  zoomPctAria: "ズーム（パーセント）",
+  imageBoxAria: "挿入された画像。矢印キーで移動、プラスとマイナスでサイズ変更、Delete で削除します。",
+  dragResize: "ドラッグしてサイズ変更",
+  deleteImage: "画像を削除",
+  droppedChars: "{n} 文字は利用可能なフォントで描画できず、保存された PDF から除外されました。",
+  renderFailed: "この PDF は表示できませんでした。破損しているか、パスワードで保護されている可能性があります。保存してもファイルは変更されません。",
+};
+
+const LOCALES: Record<string, Dict> = { en, fr, ja };
 
 let active: Dict | null = null;
 
