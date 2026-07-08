@@ -1,6 +1,7 @@
 import * as pdfjsLib from "pdfjs-dist";
 import fontkit from "@pdf-lib/fontkit";
 import {
+  degrees,
   beginText,
   endText,
   PDFArray,
@@ -24,6 +25,7 @@ import { type Anchor, planEditedBlock } from "./glyph-edit";
 import { pageGlyphs } from "./pdf-glyphs";
 import { detectVertical, buildVerticalBlocks, layoutVerticalGlyphs, type VCol } from "./vertical";
 import { SnapHistory } from "./history";
+import { setupSearch, type SearchItem } from "./search";
 import { t } from "./i18n";
 
 // pdfedit: a standalone, framework-agnostic PDF editor.
@@ -214,6 +216,7 @@ const ICON = {
   center: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M4 6.8h8M3 10.1h10M5 13.4h6"/></svg>`,
   right: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M6 6.8h8M3 10.1h11M8 13.4h6"/></svg>`,
   justify: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M2 6.8h12M2 10.1h12M2 13.4h6"/></svg>`,
+  find: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3.3 3.3"/></svg>`,
 };
 
 const STYLE_ID = "pdfedit-style";
@@ -224,6 +227,13 @@ function injectStyles(): void {
   s.textContent = `
     .pdfedit-wrap { display:flex; flex-direction:column; height:100%; }
     .pdfedit-error { background:#7a2b2b; color:#ffd7d7; padding:10px 14px; font:13px/1.5 system-ui,sans-serif; border-radius:6px; margin:10px; }
+    .pdfedit-note { background:#5c4a1f; color:#ffe9b3; padding:8px 14px; font:13px/1.5 system-ui,sans-serif; border-radius:6px; margin:10px; }
+    .pdfedit-findbar { display:flex; align-items:center; gap:6px; padding:5px 10px; background:#23262c; border-bottom:1px solid #1c1f24; }
+    .pdfedit-findbar input { flex:0 1 260px; background:#1c1f24; border:1px solid #3a4047; border-radius:5px; color:#e7eaf0; font:13px system-ui,sans-serif; padding:4px 8px; }
+    .pdfedit-findbar button { background:#3a3f47; color:#e6e6e6; border:1px solid #4a4f57; border-radius:5px; font:13px/1.2 system-ui,sans-serif; padding:3px 9px; cursor:pointer; }
+    .pdfedit-findcount { color:#aab2bf; font:12px system-ui,sans-serif; min-width:70px; }
+    .pdfedit-find-hl { position:absolute; z-index:4; pointer-events:none; background:rgba(255,213,0,.35); border-radius:2px; }
+    .pdfedit-find-hl.is-current { background:rgba(255,140,0,.5); outline:2px solid rgba(255,140,0,.9); }
 .pdfedit-live { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); border:0; }
     .pdfedit-toolbar {
       display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px 10px;
@@ -704,6 +714,7 @@ interface Tok {
   w: number;
   space: boolean;
   faux: boolean; // emulate bold by double-striking (no real bold font available)
+  fauxItalic: boolean; // emulate italic with a shear (no real italic font available)
 }
 
 let instanceSeq = 0;
@@ -1038,6 +1049,38 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   wrap.append(toolbar.el, root, live);
   container.appendChild(wrap);
 
+  // Find bar: reads the document's extracted text per page (cached), highlights on
+  // the page shells. Available before pages render; empty until the doc loads.
+  let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null;
+  const searchItemCache = new Map<number, SearchItem[]>();
+  const search = setupSearch({
+    barParent: wrap,
+    beforeEl: root,
+    pageShell: (i) => pageEls.find((pe) => pe.index === i),
+    pageCount: () => pageEls.length,
+    async getPageItems(i) {
+      const cached = searchItemCache.get(i);
+      if (cached) return cached;
+      if (!pdfDoc) return [];
+      const page = await pdfDoc.getPage(i + 1);
+      const content = await page.getTextContent();
+      const items: SearchItem[] = [];
+      for (const item of content.items) {
+        if (!("str" in item) || item.str === "") continue;
+        const tr = item.transform as number[];
+        items.push({ str: normalizePua(item.str), x: tr[4]!, y: tr[5]!, w: item.width ?? 0, size: Math.hypot(tr[2]!, tr[3]!) || 10 });
+      }
+      searchItemCache.set(i, items);
+      return items;
+    },
+  });
+  wrap.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      search.show();
+    }
+  });
+
   // Two-finger pinch zooms the document only (it drives the same zoom control as the
   // slider), not the whole page. For touch devices such as the Android app.
   let pinchDist0 = 0;
@@ -1345,6 +1388,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   };
 
   const addTextAt = (pageEl: HTMLElement, viewport: pdfjsLib.PageViewport, pageIndex: number, clientX: number, clientY: number): void => {
+    if (passwordProtected) return; // view-only: pdf-lib cannot re-save encrypted files
     const rect = pageEl.getBoundingClientRect();
     const vx = (clientX - rect.left) / displayZoom; // undo the CSS zoom -> canvas/viewport px
     const vy = (clientY - rect.top) / displayZoom;
@@ -1525,6 +1569,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       iconBtn(ICON.center, t("alignCenter"), () => setAlign("center")),
       iconBtn(ICON.right, t("alignRight"), () => setAlign("right")),
       iconBtn(ICON.justify, t("justify"), () => setAlign("justify")),
+      sep(),
+      iconBtn(ICON.find, t("find"), () => search.toggle()),
       sep(),
     );
 
@@ -1806,9 +1852,30 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   }
 
   let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
+  let passwordProtected = false;
   void (async () => {
     loadingTask = pdfjsLib.getDocument({ data: bytes.slice(), fontExtraProperties: true });
+    // User-password PDFs: ask (retrying on a wrong one). pdf-lib cannot decrypt, so a
+    // password document opens VIEW-ONLY: overlays are not editable and getBytes
+    // returns the original bytes untouched.
+    loadingTask.onPassword = (update: (pw: string) => void, reason: number) => {
+      const pw = window.prompt(t(reason === 2 ? "passwordRetry" : "passwordPrompt"));
+      if (pw === null) {
+        void loadingTask?.destroy().catch(() => undefined); // rejects the promise; the catch shows the banner
+        return;
+      }
+      passwordProtected = true;
+      update(pw);
+    };
     const doc = await loadingTask.promise;
+    pdfDoc = doc;
+    if (passwordProtected) {
+      const note = document.createElement("div");
+      note.className = "pdfedit-note";
+      note.setAttribute("role", "note");
+      note.textContent = t("passwordViewOnly");
+      root.prepend(note);
+    }
     // Lazily parsed (pdf-lib) copy used only to recover original glyph codes for blocks whose
     // fonts have no usable Unicode. Loaded on first need so normal PDFs pay nothing.
     let glyphPdf: PDFDocument | null = null;
@@ -2120,7 +2187,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
 
         const el = document.createElement("div");
         el.className = "pdfedit-para";
-        el.contentEditable = "true";
+        el.contentEditable = passwordProtected ? "false" : "true";
         el.spellcheck = false;
         el.setAttribute("role", "textbox");
         el.setAttribute("aria-multiline", "true");
@@ -2200,12 +2267,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     // A failed render must not leave a silent blank editor: show why, and note that
     // getBytes still returns the original bytes untouched (no edits can exist).
     console.error("[pdfedit] render failed", e);
+    const pwFail = (e as { name?: string })?.name === "PasswordException" || /password/i.test(String((e as { message?: string })?.message ?? ""));
+    const msg = t(pwFail ? "passwordNeeded" : "renderFailed");
     const banner = document.createElement("div");
     banner.className = "pdfedit-error";
     banner.setAttribute("role", "alert");
-    banner.textContent = t("renderFailed");
+    banner.textContent = msg;
     root.prepend(banner);
-    options.onError?.(t("renderFailed"));
+    options.onError?.(msg);
   });
 
   // Replay a saved session onto the freshly rendered (pristine) pages: re-apply each edited
@@ -2447,6 +2516,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       return history.canRedo;
     },
     async getBytes() {
+      if (passwordProtected) return original.slice(); // view-only (no decryption support)
       const editedParas = paragraphs.filter((p) => p.dirty);
       if (editedParas.length === 0 && images.length === 0) return original.slice();
       // ignoreEncryption: owner-password PDFs (print/copy restricted) render and edit
@@ -2515,10 +2585,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         }
       };
       // Resolve a font per token: reuse the original embedded font when the run's style
-      // is unchanged from the source and the font can render that word; otherwise a
-      // standard font (WinAnsi). Per-word (not per-run) so one novel character only
-      // affects its own word, not the whole paragraph.
-      const resolveToken = async (run: StyledRun, part: string, space: boolean): Promise<{ font: PDFFont; text: string; faux: boolean }> => {
+      // is unchanged from the source and the font can render that word. A bold/italic
+      // toggle first looks for a real sibling variant of the same family in the file;
+      // failing that it keeps the ORIGINAL typeface and emulates the difference (double
+      // strike for bold, shear for italic) instead of switching to Helvetica/Times.
+      // Only a style the original cannot express in that direction (un-bolding a
+      // bold-only font) falls back to a standard font. Per-word so one novel character
+      // only affects its own word, not the whole paragraph.
+      const resolveToken = async (run: StyledRun, part: string, space: boolean): Promise<{ font: PDFFont; text: string; faux: boolean; fauxItalic: boolean }> => {
         const rec = run.fontKey ? fontRecs.get(run.fontKey) : undefined;
         // "Effective" original weight includes synthBold (a font that renders heavier than
         // its sibling). Matching it means the user didn't toggle, so reuse the real font.
@@ -2528,23 +2602,40 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         // Pick the embed source: the run's own font if it has a program, else a sibling
         // with the same base name that does (e.g. a Type3 font borrowing its CID twin).
         let embKey: string | undefined;
-        if (run.fontKey && styleSame && rec) {
-          if (rec.data?.length) embKey = run.fontKey;
-          else {
-            const donor = findDonor(rec.baseName, (r) => !!r.data?.length);
-            if (donor) embKey = donor[0];
+        if (run.fontKey && rec) {
+          if (styleSame) {
+            if (rec.data?.length) embKey = run.fontKey;
+            else {
+              const donor = findDonor(rec.baseName, (r) => !!r.data?.length);
+              if (donor) embKey = donor[0];
+            }
+          } else {
+            // Toggled style: a sibling with the requested weight/slant keeps the family.
+            const sibling = findDonor(rec.baseName, (r) => !!r.data?.length && (r.bold || !!r.synthBold) === run.bold && r.italic === run.italic);
+            if (sibling) embKey = sibling[0];
+            else if (run.bold >= effBold && run.italic >= rec.italic) {
+              // Additive emphasis only: the original face can be thickened or sheared,
+              // but cannot be un-bolded or un-italicized; those fall to the std font.
+              if (rec.data?.length) embKey = run.fontKey;
+              else {
+                const donor = findDonor(rec.baseName, (r) => !!r.data?.length);
+                if (donor) embKey = donor[0];
+              }
+            }
           }
         }
         const emb = embKey ? await getEmbedded(embKey) : null;
         const embPua = !!(embKey && puaFonts.has(embKey));
         // A symbol font has glyphs at U+F0xx, not at ASCII; re-encode the text to reuse it.
-        if (space) return { font: emb && !embPua ? emb : std, text: " ", faux: false };
+        if (space) return { font: emb && !embPua ? emb : std, text: " ", faux: false, fauxItalic: false };
         if (emb) {
           const reencoded = embPua ? toPua(part) : part;
           if (covers(emb, reencoded)) {
-            // Faux-bold when the run is bold but the reused font isn't an actual bold font.
-            const embBold = !!(embKey && fontRecs.get(embKey)?.bold);
-            return { font: emb, text: reencoded, faux: run.bold && !embBold };
+            const embRec = embKey ? fontRecs.get(embKey) : undefined;
+            // Faux styles when the run asks for more than the reused font provides.
+            const embBold = !!(embRec && (embRec.bold || embRec.synthBold));
+            const embItalic = !!embRec?.italic;
+            return { font: emb, text: reencoded, faux: run.bold && !embBold, fauxItalic: run.italic && !embItalic };
           }
         }
         // Standard-font path: characters WinAnsi can't encode try the Unicode
@@ -2553,11 +2644,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const clean = normalized.replace(STD_DROP_RE, "");
         if (clean !== normalized) {
           const fb = await getFallback();
-          if (fb && covers(fb, part)) return { font: fb, text: part, faux: run.bold };
-          if (fb && covers(fb, normalized)) return { font: fb, text: normalized, faux: run.bold };
+          if (fb && covers(fb, part)) return { font: fb, text: part, faux: run.bold, fauxItalic: run.italic };
+          if (fb && covers(fb, normalized)) return { font: fb, text: normalized, faux: run.bold, fauxItalic: run.italic };
           dropped.n += normalized.length - clean.length;
         }
-        return { font: std, text: clean, faux: false };
+        return { font: std, text: clean, faux: false, fauxItalic: false };
       };
 
       for (const pp of editedParas) {
@@ -2609,6 +2700,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       return new Uint8Array(await pdf.save());
     },
     destroy() {
+      search.teardown();
       destroyed = true;
       document.removeEventListener("selectionchange", onSelChange);
       document.removeEventListener("keydown", onUndoKeys);
@@ -2703,7 +2795,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     page: PDFPage,
     pp: Paragraph,
     runs: StyledRun[],
-    resolveToken: (run: StyledRun, part: string, space: boolean) => Promise<{ font: PDFFont; text: string; faux: boolean }>,
+    resolveToken: (run: StyledRun, part: string, space: boolean) => Promise<{ font: PDFFont; text: string; faux: boolean; fauxItalic: boolean }>,
   ): Promise<void> {
     const glyphs = layoutVerticalGlyphs(runs, {
       startX: pp.vStartX ?? pp.x,
@@ -2727,7 +2819,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     page: PDFPage,
     pp: Paragraph,
     runs: StyledRun[],
-    resolveToken: (run: StyledRun, part: string, space: boolean) => Promise<{ font: PDFFont; text: string; faux: boolean }>,
+    resolveToken: (run: StyledRun, part: string, space: boolean) => Promise<{ font: PDFFont; text: string; faux: boolean; fauxItalic: boolean }>,
   ): Promise<void> {
     // Tokenize runs into words/spaces, resolving a font per token.
     const toks: Tok[] = [];
@@ -2737,14 +2829,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       for (const part of parts) {
         if (part === "") continue;
         const space = /^\s+$/.test(part);
-        const { font, text, faux } = await resolveToken(run, part, space);
+        const { font, text, faux, fauxItalic } = await resolveToken(run, part, space);
         let w = 0;
         try {
           w = font.widthOfTextAtSize(text, run.size);
         } catch {
           w = run.size * text.length * 0.5;
         }
-        toks.push({ text, run, font, w, space, faux });
+        toks.push({ text, run, font, w, space, faux, fauxItalic });
       }
       if (run.brAfter) lineBreaks.push(toks.length);
     }
@@ -2785,9 +2877,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         if (!t.space) {
           try {
             const col = rgb(t.run.color.r, t.run.color.g, t.run.color.b);
-            page.drawText(t.text, { x, y, size: t.run.size, font: t.font, color: col });
+            // Faux italic: shear the glyphs (x' = x + tan(12) * y), the classic synthetic slant.
+            const skew = t.fauxItalic ? degrees(12) : undefined;
+            page.drawText(t.text, { x, y, size: t.run.size, font: t.font, color: col, ySkew: skew });
             // Faux bold: redraw with a small horizontal offset to thicken the strokes.
-            if (t.faux) page.drawText(t.text, { x: x + Math.max(t.run.size * 0.03, 0.2), y, size: t.run.size, font: t.font, color: col });
+            if (t.faux) page.drawText(t.text, { x: x + Math.max(t.run.size * 0.03, 0.2), y, size: t.run.size, font: t.font, color: col, ySkew: skew });
           } catch {
             /* glyph not encodable */
           }
