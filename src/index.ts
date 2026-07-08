@@ -229,6 +229,7 @@ function injectStyles(): void {
     .pdfedit-error { background:#7a2b2b; color:#ffd7d7; padding:10px 14px; font:13px/1.5 system-ui,sans-serif; border-radius:6px; margin:10px; }
     .pdfedit-note { background:#5c4a1f; color:#ffe9b3; padding:8px 14px; font:13px/1.5 system-ui,sans-serif; border-radius:6px; margin:10px; }
     .pdfedit-findbar { display:flex; align-items:center; gap:6px; padding:5px 10px; background:#23262c; border-bottom:1px solid #1c1f24; }
+    .pdfedit-findbar[hidden] { display:none; }
     .pdfedit-findbar input { flex:0 1 260px; background:#1c1f24; border:1px solid #3a4047; border-radius:5px; color:#e7eaf0; font:13px system-ui,sans-serif; padding:4px 8px; }
     .pdfedit-findbar button { background:#3a3f47; color:#e6e6e6; border:1px solid #4a4f57; border-radius:5px; font:13px/1.2 system-ui,sans-serif; padding:3px 9px; cursor:pointer; }
     .pdfedit-findcount { color:#aab2bf; font:12px system-ui,sans-serif; min-width:70px; }
@@ -2598,7 +2599,9 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         // its sibling). Matching it means the user didn't toggle, so reuse the real font.
         const effBold = rec ? rec.bold || !!rec.synthBold : run.bold;
         const styleSame = !!(rec && run.bold === effBold && run.italic === rec.italic);
-        const std = await getStd(standardFont(rec ? rec.family : run.family, run.bold, run.italic));
+        // Lazy: only embed a standard font when a token actually needs it, so a fully
+        // embedded document exports without a stray Helvetica object.
+        const stdOf = () => getStd(standardFont(rec ? rec.family : run.family, run.bold, run.italic));
         // Pick the embed source: the run's own font if it has a program, else a sibling
         // with the same base name that does (e.g. a Type3 font borrowing its CID twin).
         let embKey: string | undefined;
@@ -2627,7 +2630,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const emb = embKey ? await getEmbedded(embKey) : null;
         const embPua = !!(embKey && puaFonts.has(embKey));
         // A symbol font has glyphs at U+F0xx, not at ASCII; re-encode the text to reuse it.
-        if (space) return { font: emb && !embPua ? emb : std, text: " ", faux: false, fauxItalic: false };
+        if (space) return { font: emb && !embPua ? emb : await stdOf(), text: " ", faux: false, fauxItalic: false };
         if (emb) {
           const reencoded = embPua ? toPua(part) : part;
           if (covers(emb, reencoded)) {
@@ -2648,7 +2651,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           if (fb && covers(fb, normalized)) return { font: fb, text: normalized, faux: run.bold, fauxItalic: run.italic };
           dropped.n += normalized.length - clean.length;
         }
-        return { font: std, text: clean, faux: false, fauxItalic: false };
+        return { font: await stdOf(), text: clean, faux: false, fauxItalic: false };
       };
 
       for (const pp of editedParas) {
