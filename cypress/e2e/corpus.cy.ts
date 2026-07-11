@@ -13,20 +13,29 @@ function openFixture(name: string) {
   cy.get(".pdfedit-para", { timeout: RENDER_TIMEOUT }).should("have.length.greaterThan", 0);
 }
 
-// The visible text across every rendered paragraph, whitespace-collapsed.
-function allParaText(): Cypress.Chainable<string> {
-  return cy.get(".pdfedit-para").then(($p) => $p.toArray().map((el) => el.textContent ?? "").join(" ").replace(/\s+/g, " "));
+// Pages render lazily as they enter the viewport, so scroll each page into view to force
+// its paragraph overlay to render (rendered pages are retained, so text accumulates).
+function renderAllPages() {
+  cy.get(".pdfedit-page", { timeout: RENDER_TIMEOUT }).should("have.length", 3);
+  cy.get(".pdfedit-page").each(($page) => cy.wrap($page).scrollIntoView());
+  cy.get(".pdfedit-page").first().scrollIntoView();
+}
+
+// A retrying assertion that every page marker is present across the rendered paragraphs.
+function expectAllPageMarkers() {
+  cy.get(".pdfedit-para", { timeout: RENDER_TIMEOUT }).should(($p) => {
+    const t = $p.toArray().map((el) => el.textContent ?? "").join(" ");
+    expect(t).to.contain("PageOneMarker");
+    expect(t).to.contain("PageTwoMarker");
+    expect(t).to.contain("PageThreeMarker");
+  });
 }
 
 describe("real-file corpus: multi-page PDF", () => {
   it("renders all three pages with their text", () => {
     openFixture("multipage.pdf");
-    cy.get(".pdfedit-page", { timeout: RENDER_TIMEOUT }).should("have.length", 3);
-    allParaText().should((t) => {
-      expect(t).to.contain("PageOneMarker");
-      expect(t).to.contain("PageTwoMarker");
-      expect(t).to.contain("PageThreeMarker");
-    });
+    renderAllPages();
+    expectAllPageMarkers();
   });
 
   it("preserves every page's text through a no-edit save round-trip", () => {
@@ -37,12 +46,8 @@ describe("real-file corpus: multi-page PDF", () => {
       .then((bytes) => {
         cy.get("#file").selectFile({ contents: Cypress.Buffer.from(bytes), fileName: "roundtrip.pdf" }, { force: true });
         cy.get(".pdfedit-para", { timeout: RENDER_TIMEOUT }).should("have.length.greaterThan", 0);
-        cy.get(".pdfedit-page", { timeout: RENDER_TIMEOUT }).should("have.length", 3);
-        allParaText().should((t) => {
-          expect(t, "text survives the save round-trip").to.contain("PageOneMarker");
-          expect(t).to.contain("PageTwoMarker");
-          expect(t).to.contain("PageThreeMarker");
-        });
+        renderAllPages();
+        expectAllPageMarkers();
       });
   });
 });
