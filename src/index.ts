@@ -57,6 +57,7 @@ import {
 } from "./style";
 import { sampleColors, sampleRunStats } from "./sampling";
 import { layoutLine, wrapTokens } from "./layout";
+import { pxRectToPdfRect } from "./geometry";
 
 // pdfedit: a standalone, framework-agnostic PDF editor.
 //
@@ -1448,14 +1449,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   function updateImageRect(rec: ImageItem, viewport: pdfjsLib.PageViewport): void {
     const left = parseFloat(rec.el.style.left);
     const top = parseFloat(rec.el.style.top);
-    const w = rec.el.offsetWidth;
-    const h = rec.el.offsetHeight;
-    const tl = viewport.convertToPdfPoint(left, top);
-    const br = viewport.convertToPdfPoint(left + w, top + h);
-    rec.xPdf = Math.min(tl[0]!, br[0]!);
-    rec.yPdf = Math.min(tl[1]!, br[1]!);
-    rec.wPdf = Math.abs(br[0]! - tl[0]!);
-    rec.hPdf = Math.abs(br[1]! - tl[1]!);
+    const r = pxRectToPdfRect(left, top, rec.el.offsetWidth, rec.el.offsetHeight, viewport);
+    rec.xPdf = r.x;
+    rec.yPdf = r.y;
+    rec.wPdf = r.w;
+    rec.hPdf = r.h;
   }
 
   let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
