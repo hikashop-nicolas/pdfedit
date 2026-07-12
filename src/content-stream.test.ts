@@ -112,4 +112,12 @@ describe("layoutGlyphs", () => {
     const g = layoutGlyphs("BT /F1 10 Tf 1 0 0 1 0 0 Tm /P0 scn (A) Tj ET", metrics);
     expect(g[0]!.visible).toBe(true);
   });
+
+  it("treats a fully-transparent ExtGState fill (ca=0) as invisible text", () => {
+    const alpha = (n: string) => (n === "GS0" ? 0 : n === "GS1" ? 1 : undefined);
+    const clear = layoutGlyphs("BT /F1 10 Tf 1 0 0 1 0 0 Tm /GS0 gs (A) Tj ET", metrics, alpha);
+    expect(clear[0]!.visible).toBe(false);
+    const opaque = layoutGlyphs("BT /F1 10 Tf 1 0 0 1 0 0 Tm /GS1 gs (A) Tj ET", metrics, alpha);
+    expect(opaque[0]!.visible).toBe(true);
+  });
 });

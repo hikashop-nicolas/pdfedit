@@ -94,9 +94,30 @@ function buildMetrics(page: ReturnType<PDFDocument["getPage"]>): Record<string, 
   return out;
 }
 
+// Fill alpha (/ca) per ExtGState resource, so a fully-transparent OCR text layer reads as
+// invisible in the layout pass.
+function buildAlpha(page: ReturnType<PDFDocument["getPage"]>): Record<string, number> {
+  const out: Record<string, number> = {};
+  const res = page.node.Resources();
+  const gsDict = res?.lookupMaybe(PDFName.of("ExtGState"), PDFDict);
+  if (!gsDict) return out;
+  const ctx = page.node.context;
+  for (const [key, ref] of gsDict.entries()) {
+    try {
+      const gs = ctx.lookup(ref) as PDFDict;
+      const ca = gs.lookup(PDFName.of("ca"));
+      if (ca instanceof PDFNumber) out[key.toString().slice(1)] = ca.asNumber();
+    } catch {
+      /* skip an ExtGState we can't read */
+    }
+  }
+  return out;
+}
+
 /** Placed glyphs (font resource, byte code, user-space position) for one page. */
 export function pageGlyphs(pdf: PDFDocument, pageIndex: number): PlacedGlyph[] {
   const page = pdf.getPage(pageIndex);
   const metrics = buildMetrics(page);
-  return layoutGlyphs(decodedContent(page), (r) => metrics[r]);
+  const alpha = buildAlpha(page);
+  return layoutGlyphs(decodedContent(page), (r) => metrics[r], (n) => alpha[n]);
 }

@@ -318,7 +318,13 @@ export interface PlacedGlyph {
  * advance widths. This resolves glyph positions inside a single big TJ (the common case),
  * which is what lets each glyph be anchored to the edited text and re-emitted on its own.
  */
-export function layoutGlyphs(content: string, metricsOf: (fontRes: string) => FontMetrics | undefined): PlacedGlyph[] {
+export function layoutGlyphs(
+  content: string,
+  metricsOf: (fontRes: string) => FontMetrics | undefined,
+  // Fill alpha (/ca) for an ExtGState resource, so fully-transparent text (e.g. an OCR layer
+  // over a scanned page) is detected as invisible. Optional; omitted alpha means opaque.
+  gsAlpha?: (gsName: string) => number | undefined,
+): PlacedGlyph[] {
   const toks = tokenizeContentStream(content);
   const glyphs: PlacedGlyph[] = [];
   let ctm: Matrix = [1, 0, 0, 1, 0, 0];
@@ -332,12 +338,14 @@ export function layoutGlyphs(content: string, metricsOf: (fontRes: string) => Fo
   let tw = 0; // word spacing
   let th = 1; // horizontal scale (Tz/100)
   let tr = 0; // text render mode
+  let ca = 1; // non-stroking (fill) alpha, from the current ExtGState
   let fill: [number, number, number] = [0, 0, 0]; // non-stroking fill colour
   let operands: Token[] = [];
   const nums = () => operands.filter((t) => t.t === "num").map((t) => t.v as number);
 
   const isVisible = (): boolean => {
     if (tr === 3 || tr === 7) return false; // invisible / clip-only text
+    if (ca <= 0.05) return false; // fully transparent fill (OCR text layer)
     const hasFill = tr === 0 || tr === 2 || tr === 4 || tr === 6;
     const white = fill[0] >= 0.95 && fill[1] >= 0.95 && fill[2] >= 0.95;
     return !(hasFill && white); // white fill on a (white) page is invisible
@@ -411,6 +419,12 @@ export function layoutGlyphs(content: string, metricsOf: (fontRes: string) => Fo
       case "Tr":
         if (a.length) tr = a[a.length - 1]!;
         break;
+      case "gs": {
+        const nm = operands.filter((t) => t.t === "name").pop();
+        const av = nm ? gsAlpha?.(nm.v as string) : undefined;
+        if (av != null) ca = av;
+        break;
+      }
       case "rg":
         if (a.length >= 3) fill = [a[a.length - 3]!, a[a.length - 2]!, a[a.length - 1]!];
         break;
