@@ -57,7 +57,7 @@ import {
 } from "./style";
 import { sampleColorsFrom, sampleRunStatsFrom, type PageImage } from "./sampling";
 import { layoutLine, wrapTokens } from "./layout";
-import { pxRectToPdfRect } from "./geometry";
+import { pxRectToPdfRect, rotatePoint, textAngle, uniformRotation, uprightViewport } from "./geometry";
 
 // pdfedit: a standalone, framework-agnostic PDF editor.
 //
@@ -195,6 +195,10 @@ interface Paragraph {
   /** Pristine overlay HTML/alignment, captured while clean, for undo back to unedited. */
   origHtml?: string;
   origAlign?: Align;
+  /** Text-matrix rotation (0/90/180/270). Non-zero pages are read in an upright space and
+   *  re-rotated on export; the paragraph's x/topY/bottomY/firstBaseline are in that upright
+   *  space, mapped back to user space (plus this draw rotation) when drawn. */
+  rotate?: number;
   /** Tategaki block: glyphs flow top-to-bottom, columns right-to-left. */
   vertical?: boolean;
   vStartX?: number; // rightmost column's glyph-origin x (draw start)
@@ -1839,12 +1843,15 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
 
       const content = await page.getTextContent();
       const allItems: RunItem[] = [];
+      const angleOf = new Map<RunItem, number>(); // per-item text-matrix rotation (0/90/180/270)
       for (const item of content.items) {
         if (!("str" in item) || item.str === "") continue;
         const t = item.transform as number[];
         const norm = normalizePua(item.str);
         if (norm !== item.str) puaFonts.add(item.fontName); // symbol font: remember for export
-        allItems.push({ str: norm, x: t[4]!, y: t[5]!, w: item.width ?? 0, size: Math.hypot(t[2]!, t[3]!) || 10, fontName: item.fontName });
+        const it: RunItem = { str: norm, x: t[4]!, y: t[5]!, w: item.width ?? 0, size: Math.hypot(t[2]!, t[3]!) || 10, fontName: item.fontName };
+        allItems.push(it);
+        angleOf.set(it, textAngle(t));
       }
       // Drop hidden text layers: some PDFs (e.g. Google Docs / OCR exports) draw the
       // visible glyphs with an embedded/Type3 font and overlay an invisible copy in a
@@ -1932,12 +1939,23 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         }
       }
 
+      // Whole-page rotation: if every text item shares one non-zero text-matrix angle (a
+      // landscape doc stored as portrait + /Rotate, whose glyphs are pre-rotated), read and
+      // edit the page in the deskewed "upright" space so the horizontal-baseline heuristics
+      // work, then re-rotate on export. A fragile-font page keeps the plain path (its glyph
+      // anchors live in user space). An upright/mixed page yields 0 -> exact no-op below.
+      const textItems = items.filter((it) => it.str.trim() !== "");
+      const paraRotate = pageHasFragileFont ? 0 : uniformRotation(textItems.map((it) => angleOf.get(it) ?? 0));
+      // A viewport that accepts upright-space points, so the overlay placement and canvas
+      // colour sampling below need no other change (angle 0 returns the real viewport).
+      const uvp = uprightViewport(viewport, paraRotate);
+
       // Sample the background under a line so the grouper can split blocks that differ in
       // fill (e.g. a shaded table header above a white data cell), even when adjacent.
       const bgOf = pageImg
         ? (ln: Line): RGB | null => {
-            const a = viewport.convertToViewportPoint(ln.minX, ln.y + ln.size * 0.85);
-            const b = viewport.convertToViewportPoint(ln.maxX, ln.y - ln.size * 0.3);
+            const a = uvp.convertToViewportPoint(ln.minX, ln.y + ln.size * 0.85);
+            const b = uvp.convertToViewportPoint(ln.maxX, ln.y - ln.size * 0.3);
             const left = Math.min(a[0]!, b[0]!);
             const top = Math.min(a[1]!, b[1]!);
             const w = Math.max(Math.abs(b[0]! - a[0]!), 2);
@@ -1951,12 +1969,17 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         : undefined;
 
       const visible = items.filter((it) => !it.invisible);
-      if (detectVertical(visible)) {
+      // Tategaki has upright glyphs stepped down a column (angle 0); a rotated page is not
+      // that, so only look for vertical text on a non-rotated page.
+      if (!paraRotate && detectVertical(visible)) {
         for (const cols of buildVerticalBlocks(visible)) renderVerticalBlock(cols, p - 1, page, viewport, pageImg, pageEl);
         upgradeOverlayFonts(paragraphs.slice(parasBefore));
         await applyDisplayFonts();
         return; // the page shell is already attached
       }
+      // Deskew the rotated page's items into upright space (baselines now horizontal) so the
+      // grouping/box maths below are unchanged; export maps each drawn point back via `rotate`.
+      if (paraRotate) for (const it of visible) [it.x, it.y] = rotatePoint(it.x, it.y, -paraRotate);
       for (const lines of buildParagraphs(visible, bgOf)) {
         const first = lines[0]!;
         if (lines.every((l) => l.text.trim() === "")) continue;
@@ -1977,8 +2000,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const firstRec = getFontRec(page, first.items[0]!.fontName);
         const famCss = (rec: FontRec) => (rec.cssName ? `'${rec.cssName}', ${cssFamily(rec.family)}` : cssFamily(rec.family));
 
-        const tl = viewport.convertToViewportPoint(boxX, topY);
-        const br = viewport.convertToViewportPoint(boxRight, bottomY);
+        const tl = uvp.convertToViewportPoint(boxX, topY);
+        const br = uvp.convertToViewportPoint(boxRight, bottomY);
         const left = Math.min(tl[0]!, br[0]!);
         const top = Math.min(tl[1]!, br[1]!);
         const dW = Math.abs(br[0]! - tl[0]!);
@@ -2047,7 +2070,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
               curFontName = it.fontName;
               curSize = it.size;
               if (pageImg && it.str.trim() !== "") {
-                const st = sampleRunStatsFrom(pageImg, viewport, it.x, it.y, it.w, it.size);
+                const st = sampleRunStatsFrom(pageImg, uvp, it.x, it.y, it.w, it.size);
                 if (perItemColor) curColor = rgb255ToHex(st.fg);
                 rec.inkSum = (rec.inkSum ?? 0) + st.ink;
                 rec.inkN = (rec.inkN ?? 0) + 1;
@@ -2128,6 +2151,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           bg: norm(bg),
           origText,
           dirty: false,
+          rotate: paraRotate,
           el,
           viewport,
           anchorText,
@@ -2598,7 +2622,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         // Cover the original text region before redrawing; a box added in blank space has
         // nothing to cover (and a white rectangle could hide a coloured background/image).
         if (!pp.isNew) {
-          page.drawRectangle({ x: pp.x, y: pp.bottomY, width: Math.max(pp.w, 1), height: Math.max(pp.topY - pp.bottomY, 1), color: rgb(pp.bg.r, pp.bg.g, pp.bg.b) });
+          const [cx, cy] = pp.rotate ? rotatePoint(pp.x, pp.bottomY, pp.rotate) : [pp.x, pp.bottomY];
+          page.drawRectangle({ x: cx, y: cy, width: Math.max(pp.w, 1), height: Math.max(pp.topY - pp.bottomY, 1), color: rgb(pp.bg.r, pp.bg.g, pp.bg.b), ...(pp.rotate ? { rotate: degrees(pp.rotate) } : {}) });
         }
         // Fallback for text typed directly in the block (outside any span): the paragraph's
         // dominant font, so stray text exports in the document font, not a generic one.
@@ -2799,20 +2824,31 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const lineSize = Math.max(pp.size, ...line.map((t) => t.run.size));
       const { x: startX, spaceExtra } = layoutLine(line, pp.align, pp.x, pp.w, li === lastIdx);
       let x = startX;
+      // On a rotated page the layout runs in upright space; map each drawn origin back to
+      // user space and add the matching draw rotation (an angle-0 page keeps x,y verbatim).
+      const rotOpt = pp.rotate ? { rotate: degrees(pp.rotate) } : {};
+      const at = (ux: number, uy: number): [number, number] => (pp.rotate ? rotatePoint(ux, uy, pp.rotate) : [ux, uy]);
       for (const t of line) {
         if (!t.space) {
           try {
             const col = rgb(t.run.color.r, t.run.color.g, t.run.color.b);
             // Faux italic: shear the glyphs (x' = x + tan(12) * y), the classic synthetic slant.
             const skew = t.fauxItalic ? degrees(12) : undefined;
-            page.drawText(t.text, { x, y, size: t.run.size, font: t.font, color: col, ySkew: skew });
+            const [dx, dy] = at(x, y);
+            page.drawText(t.text, { x: dx, y: dy, size: t.run.size, font: t.font, color: col, ySkew: skew, ...rotOpt });
             // Faux bold: redraw with a small horizontal offset to thicken the strokes.
-            if (t.faux) page.drawText(t.text, { x: x + Math.max(t.run.size * 0.03, 0.2), y, size: t.run.size, font: t.font, color: col, ySkew: skew });
+            if (t.faux) {
+              const [bx, by] = at(x + Math.max(t.run.size * 0.03, 0.2), y);
+              page.drawText(t.text, { x: bx, y: by, size: t.run.size, font: t.font, color: col, ySkew: skew, ...rotOpt });
+            }
           } catch {
             /* glyph not encodable */
           }
           if (t.run.href) {
-            addLink(pdf, page, x, y - t.run.size * 0.2, t.w, t.run.size * 1.1, t.run.href);
+            // Link annotation Rect is axis-aligned in user space: use the rotated box's bbox.
+            const [ax, ay] = at(x, y - t.run.size * 0.2);
+            const [ex, ey] = at(x + t.w, y + t.run.size * 0.9);
+            addLink(pdf, page, Math.min(ax, ex), Math.min(ay, ey), Math.abs(ex - ax), Math.abs(ey - ay), t.run.href);
           }
         }
         x += t.w + (t.space ? spaceExtra : 0);

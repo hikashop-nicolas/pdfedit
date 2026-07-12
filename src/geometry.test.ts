@@ -1,5 +1,70 @@
 import { describe, expect, it } from "vitest";
-import { pxRectToPdfRect } from "./geometry";
+import { pxRectToPdfRect, rotatePoint, textAngle, uniformRotation, uprightViewport } from "./geometry";
+
+describe("rotatePoint", () => {
+  it("is an exact identity at angle 0", () => {
+    expect(rotatePoint(37, 51, 0)).toEqual([37, 51]);
+  });
+  it("rotates CCW by 90 (x,y -> -y,x)", () => {
+    expect(rotatePoint(200, -250, 90)).toEqual([250, 200]);
+  });
+  it("rotates by 270 (x,y -> y,-x)", () => {
+    const [x, y] = rotatePoint(10, 20, 270);
+    expect(x).toBeCloseTo(20, 9);
+    expect(y).toBeCloseTo(-10, 9);
+  });
+  it("round-trips a point through +deg then -deg", () => {
+    for (const deg of [90, 180, 270]) {
+      const [ux, uy] = rotatePoint(123, -45, deg);
+      const [bx, by] = rotatePoint(ux, uy, -deg);
+      expect(bx).toBeCloseTo(123, 9);
+      expect(by).toBeCloseTo(-45, 9);
+    }
+  });
+});
+
+describe("textAngle", () => {
+  it("reports 0 for horizontal text", () => {
+    expect(textAngle([22, 0, 0, 22, 5, 5])).toBe(0);
+  });
+  it("reports 90 for a /Rotate 90 upright text matrix", () => {
+    expect(textAngle([0, 22, -22, 0, 250, 200])).toBe(90);
+  });
+  it("reports 180 and 270 for the flipped matrices", () => {
+    expect(textAngle([-22, 0, 0, -22, 0, 0])).toBe(180);
+    expect(textAngle([0, -22, 22, 0, 0, 0])).toBe(270);
+  });
+});
+
+describe("uniformRotation", () => {
+  it("is 0 when everything is upright", () => {
+    expect(uniformRotation([0, 0, 0])).toBe(0);
+  });
+  it("is the shared angle when every item agrees", () => {
+    expect(uniformRotation([90, 90, 90])).toBe(90);
+  });
+  it("falls back to 0 on any disagreement", () => {
+    expect(uniformRotation([90, 90, 0])).toBe(0);
+    expect(uniformRotation([90, 270])).toBe(0);
+  });
+  it("is 0 for no items", () => {
+    expect(uniformRotation([])).toBe(0);
+  });
+});
+
+describe("uprightViewport", () => {
+  const vp = {
+    convertToViewportPoint: (x: number, y: number) => [x, 800 - y],
+    convertToPdfPoint: (x: number, y: number) => [x, 800 - y],
+  };
+  it("returns the very same viewport object at angle 0 (no-op)", () => {
+    expect(uprightViewport(vp, 0)).toBe(vp);
+  });
+  it("maps an upright point back to user space before delegating (deg 90)", () => {
+    // upright (200,-250) -> user (250,200) -> viewport [250, 800-200]
+    expect(uprightViewport(vp, 90).convertToViewportPoint(200, -250)).toEqual([250, 600]);
+  });
+});
 
 describe("pxRectToPdfRect", () => {
   it("flips the y axis for an upright page (y-down px -> y-up pdf)", () => {
