@@ -78,7 +78,14 @@ function buildMetrics(page: ReturnType<PDFDocument["getPage"]>): Record<string, 
         const Wd = fd.lookup(PDFName.of("Widths"));
         const arr: number[] = [];
         if (Wd instanceof PDFArray) for (let i = 0; i < Wd.size(); i++) arr.push(num(ctx.lookup(Wd.get(i))) ?? 0);
-        out[name] = { bytesPerCode: 1, width: (code) => arr[code - fc] ?? 0 };
+        // A code outside (or absent) the Widths array must not anchor at width 0, or every
+        // glyph would stack on the same x. Fall back to the descriptor's MissingWidth, else a
+        // typical advance. An explicit 0 in Widths is kept (only a missing entry falls back).
+        let missing = 500;
+        const fdesc = ctx.lookupMaybe(fd.lookup(PDFName.of("FontDescriptor")), PDFDict);
+        const mw = fdesc ? num(fdesc.lookup(PDFName.of("MissingWidth"))) : undefined;
+        if (mw != null) missing = mw;
+        out[name] = { bytesPerCode: 1, width: (code) => arr[code - fc] ?? missing };
       }
     } catch {
       /* skip a font we can't read; its glyphs just won't be anchored */

@@ -23,6 +23,22 @@ describe("tokenizeContentStream", () => {
       { t: "op", v: "g" },
     ]);
   });
+
+  it("decodes octal and named escapes in a literal string", () => {
+    // \101 = octal 'A', \t = tab, \\ = backslash, \) = ), \n = newline.
+    const toks = tokenizeContentStream("(\\101\\t\\\\\\)\\n) Tj");
+    expect(toks[0]).toEqual({ t: "str", v: "A\t\\)\n" });
+  });
+
+  it("treats backslash-newline as a line continuation (dropped)", () => {
+    expect(tokenizeContentStream("(ab\\\ncd) Tj")[0]).toEqual({ t: "str", v: "abcd" });
+    expect(tokenizeContentStream("(ab\\\r\ncd) Tj")[0]).toEqual({ t: "str", v: "abcd" });
+  });
+
+  it("stops an octal escape at three digits", () => {
+    // \1015 -> octal '101' ('A') then a literal '5'.
+    expect(tokenizeContentStream("(\\1015) Tj")[0]).toEqual({ t: "str", v: "A5" });
+  });
 });
 
 describe("extractTextRuns", () => {
@@ -80,5 +96,20 @@ describe("layoutGlyphs", () => {
     const g = layoutGlyphs("BT /C 10 Tf 1 0 0 1 0 0 Tm [<0005>100<0006>] TJ ET", metrics);
     // 0005 at 0 (advance 10), kern 100 -> -1, 0006 at 10-1 = 9
     expect(g.map((x) => x.x)).toEqual([0, 9]);
+  });
+
+  it("marks white text invisible whether set via rg, g or scn", () => {
+    const white = (setColor: string) => layoutGlyphs(`BT /F1 10 Tf 1 0 0 1 0 0 Tm ${setColor} (A) Tj ET`, metrics)[0]!.visible;
+    expect(white("1 1 1 rg")).toBe(false);
+    expect(white("1 g")).toBe(false);
+    expect(white("1 1 1 scn")).toBe(false); // scn rgb white — previously missed
+    expect(white("0 0 0 0 scn")).toBe(false); // scn cmyk 0,0,0,0 -> white
+    expect(white("0 0 0 1 scn")).toBe(true); // scn cmyk key=1 -> black, visible
+    expect(white("0 0 0 rg")).toBe(true); // black stays visible
+  });
+
+  it("keeps a pattern-filled (scn /P) run visible (not mistaken for white)", () => {
+    const g = layoutGlyphs("BT /F1 10 Tf 1 0 0 1 0 0 Tm /P0 scn (A) Tj ET", metrics);
+    expect(g[0]!.visible).toBe(true);
   });
 });

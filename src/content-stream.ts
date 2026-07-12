@@ -55,14 +55,38 @@ export function tokenizeContentStream(s: string): Token[] {
       continue;
     }
     if (c === "(") {
-      // literal string: balanced parens, backslash escapes
+      // literal string: balanced parens with backslash escapes (PDF 7.3.4.2). Escapes must be
+      // decoded here, not passed through raw, or e.g. "\101" (octal 'A') and "\n" (a newline)
+      // would be read as the literal characters '1','0','1' and 'n' and corrupt the glyph bytes.
       let depth = 1;
       let j = i + 1;
       let str = "";
       while (j < n && depth > 0) {
         const ch = s[j]!;
         if (ch === "\\") {
-          str += s[j + 1] ?? "";
+          const e = s[j + 1] ?? "";
+          if (e >= "0" && e <= "7") {
+            // octal escape \ddd, 1-3 digits
+            let oct = e;
+            let k = j + 2;
+            while (k < n && oct.length < 3 && s[k]! >= "0" && s[k]! <= "7") {
+              oct += s[k];
+              k++;
+            }
+            str += String.fromCharCode(parseInt(oct, 8) & 0xff);
+            j = k;
+            continue;
+          }
+          switch (e) {
+            case "n": str += "\n"; break;
+            case "r": str += "\r"; break;
+            case "t": str += "\t"; break;
+            case "b": str += "\b"; break;
+            case "f": str += "\f"; break;
+            case "\r": if (s[j + 2] === "\n") j++; break; // line continuation (CR or CRLF): drop
+            case "\n": break; // line continuation (LF): drop the newline
+            default: str += e; break; // \( \) \\ and any other char: keep the char verbatim
+          }
           j += 2;
           continue;
         }
@@ -397,6 +421,21 @@ export function layoutGlyphs(content: string, metricsOf: (fontRes: string) => Fo
         if (a.length >= 4) {
           const [c, m, y, kk] = a.slice(-4) as [number, number, number, number];
           fill = [(1 - c) * (1 - kk), (1 - m) * (1 - kk), (1 - y) * (1 - kk)];
+        }
+        break;
+      }
+      case "sc":
+      case "scn": {
+        // Generic fill colour in the current colour space. Infer from the operand count the
+        // same way g/rg/k do (1 = gray, 3 = rgb, 4 = cmyk); a pattern (scn /P with no numbers)
+        // is left as-is so it is not mistaken for white.
+        if (a.length === 4) {
+          const [c, m, y, kk] = a.slice(-4) as [number, number, number, number];
+          fill = [(1 - c) * (1 - kk), (1 - m) * (1 - kk), (1 - y) * (1 - kk)];
+        } else if (a.length === 3) {
+          fill = [a[a.length - 3]!, a[a.length - 2]!, a[a.length - 1]!];
+        } else if (a.length === 1) {
+          fill = [a[0]!, a[0]!, a[0]!];
         }
         break;
       }
