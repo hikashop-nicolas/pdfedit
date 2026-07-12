@@ -340,6 +340,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   const pageEls: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number }[] = [];
   // Lazy rendering: one promise per page (render starts on first need) + the observer.
   const pageRenders: (Promise<void> | null)[] = [];
+  // The raster <canvas> currently attached to each page (null once evicted), plus a flag
+  // recording that a page's text overlay has been built. Eviction drops only the canvas.
+  const pageCanvasEls: (HTMLCanvasElement | null)[] = [];
+  const overlayBuilt: boolean[] = [];
   let pageObserver: IntersectionObserver | null = null;
   let displayZoom = loadZoomPct() / 100; // visual zoom only (persisted); render scale + PDF coords unchanged
   const applyZoom = (z: number) => {
@@ -1563,24 +1567,28 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       root.appendChild(pageEl);
       pageData.push({ page, el: pageEl, viewport });
     }
-    const renderPage = (idx: number): Promise<void> =>
-      (pageRenders[idx] ??= (async () => {
+    // Draw (or redraw) a page's raster canvas and return the sampled image buffer. Split
+    // from the overlay build so an evicted page can restore its canvas without rebuilding
+    // (and duplicating) its text overlay. Reuses the page's existing canvas element (whose
+    // bitmap eviction zeroed) so layout and DOM order are untouched across an evict/redraw.
+    const drawCanvas = async (idx: number): Promise<{ cctx: CanvasRenderingContext2D | null; pageImg: PageImage | null } | null> => {
       const pd = pageData[idx];
-      if (!pd || destroyed) return;
+      if (!pd || destroyed) return null;
       const { page, el: pageEl, viewport } = pd;
-      const p = idx + 1;
-      const pageIndex = idx;
-      void p;
-      void pageIndex;
-      const pageW = page.getViewport({ scale: 1 }).width;
-      const parasBefore = paragraphs.length;
-      const canvas = document.createElement("canvas");
+      let canvas = pageCanvasEls[idx];
+      if (!canvas) {
+        canvas = document.createElement("canvas");
+        canvas.setAttribute("aria-hidden", "true"); // visual render; the text is in the overlay
+        pageEl.insertBefore(canvas, pageEl.firstChild); // under any boxes added before the render
+        pageCanvasEls[idx] = canvas;
+      }
+      canvas.style.width = ""; // clear any size pinned by a prior eviction
+      canvas.style.height = "";
       canvas.width = Math.floor(viewport.width);
       canvas.height = Math.floor(viewport.height);
-      canvas.setAttribute("aria-hidden", "true"); // visual render; the text is in the overlay
       const cctx = canvas.getContext("2d");
       if (cctx) await page.render({ canvasContext: cctx, viewport, canvas }).promise;
-      pageEl.insertBefore(canvas, pageEl.firstChild); // under any boxes added before the render
+      if (destroyed) return null;
       // Read the whole rendered page ONCE; every line/run colour probe below samples this
       // buffer instead of doing its own getImageData (the dominant cost on text-dense pages).
       let pageImg: PageImage | null = null;
@@ -1589,6 +1597,27 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       } catch {
         /* tainted canvas: probes fall back to black-on-white */
       }
+      return { cctx, pageImg };
+    };
+    const renderPage = (idx: number): Promise<void> =>
+      (pageRenders[idx] ??= (async () => {
+      const pd = pageData[idx];
+      if (!pd || destroyed) return;
+      const { page, el: pageEl, viewport } = pd;
+      // A page returning after eviction already has its overlay: just redraw the raster.
+      if (overlayBuilt[idx]) {
+        await drawCanvas(idx);
+        return;
+      }
+      const drawn = await drawCanvas(idx);
+      if (!drawn || destroyed) return;
+      const { cctx, pageImg } = drawn;
+      const p = idx + 1;
+      const pageIndex = idx;
+      void p;
+      void pageIndex;
+      const pageW = page.getViewport({ scale: 1 }).width;
+      const parasBefore = paragraphs.length;
 
       const content = await page.getTextContent();
       const allItems: RunItem[] = [];
@@ -1708,6 +1737,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         for (const cols of buildVerticalBlocks(visible)) renderVerticalBlock(cols, p - 1, page, viewport, pageImg, pageEl);
         upgradeOverlayFonts(paragraphs.slice(parasBefore));
         await applyDisplayFonts();
+        overlayBuilt[idx] = true;
         return; // the page shell is already attached
       }
       for (const lines of buildParagraphs(visible, bgOf)) {
@@ -1896,7 +1926,47 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       }
       upgradeOverlayFonts(paragraphs.slice(parasBefore));
       await applyDisplayFonts();
+      overlayBuilt[idx] = true;
       })());
+    // Off-screen eviction: once a rendered page scrolls far outside the viewport, drop its
+    // raster canvas to bound memory on large PDFs. The text overlay (edits, boxes, images)
+    // stays; renderPage's redraw-only path restores the canvas when the page returns. The
+    // keep margin is wider than the render margin below so pages do not thrash on the seam.
+    const evictCanvas = (idx: number): void => {
+      const c = pageCanvasEls[idx];
+      if (!c || c.width === 0) return; // already evicted or never drawn
+      // Pin the element's box at its rendered size, then drop the bitmap backing store: this
+      // frees the memory (the point of eviction) while keeping the element and page layout so
+      // nothing shifts. The overlay above it is untouched. Redrawn in place when it returns.
+      c.style.width = `${c.width}px`;
+      c.style.height = `${c.height}px`;
+      c.width = 0;
+      c.height = 0;
+      pageRenders[idx] = null; // clear the memo so the observer re-renders (redraw-only) on return
+    };
+    const sweepEviction = (): void => {
+      if (destroyed) return;
+      const rootRect = root.getBoundingClientRect();
+      const margin = Math.max(root.clientHeight * 1.5, 1500);
+      const top = rootRect.top - margin;
+      const bottom = rootRect.bottom + margin;
+      for (let i = 0; i < pageEls.length; i++) {
+        const c = pageCanvasEls[i];
+        if (!c || c.width === 0 || !overlayBuilt[i]) continue; // nothing settled to evict
+        const r = pageEls[i].el.getBoundingClientRect();
+        if (r.bottom < top || r.top > bottom) evictCanvas(i);
+      }
+    };
+    let evictScheduled = false;
+    const scheduleEviction = (): void => {
+      if (evictScheduled || destroyed) return;
+      evictScheduled = true;
+      requestAnimationFrame(() => {
+        evictScheduled = false;
+        sweepEviction();
+      });
+    };
+    root.addEventListener("scroll", scheduleEviction, { passive: true });
     const io = new IntersectionObserver(
       (entries) => {
         for (const en of entries) {
@@ -1904,6 +1974,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           const i = pageEls.findIndex((pe) => pe.el === en.target);
           if (i >= 0) void renderPage(i).catch((e) => console.error("[pdfedit] page render failed", e));
         }
+        scheduleEviction(); // a render pass is a good moment to drop pages left far behind
       },
       { root, rootMargin: "1200px 0px" },
     );
