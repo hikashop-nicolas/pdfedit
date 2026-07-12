@@ -132,6 +132,26 @@ describe("pdfedit toolbar", () => {
     });
   });
 
+  it("inserts an image dropped onto a page", () => {
+    openFixture();
+    cy.fixture("img.png", "base64").then((b64) => {
+      cy.get(".pdfedit-page")
+        .first()
+        .then(($p) => {
+          const win = $p[0]!.ownerDocument.defaultView!;
+          const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+          const file = new win.File([bytes], "img.png", { type: "image/png" });
+          const dt = new win.DataTransfer();
+          dt.items.add(file);
+          const r = $p[0]!.getBoundingClientRect();
+          cy.wrap($p)
+            .trigger("dragover", { dataTransfer: dt, force: true })
+            .trigger("drop", { dataTransfer: dt, clientX: r.left + 60, clientY: r.top + 60, force: true });
+        });
+    });
+    cy.get(".pdfedit-img").should("have.length.greaterThan", 0);
+  });
+
   it("adds a text box on double-click in blank space and exports it", () => {
     openFixture();
     cy.window().then((win) => {

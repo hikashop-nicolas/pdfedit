@@ -740,6 +740,34 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     { passive: false },
   );
 
+  // Insert an image file at a page position (drag-drop), its top-left at the drop point in
+  // page px (undoing the CSS zoom), default width.
+  const insertImageAt = async (file: File, pd: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number }, clientX: number, clientY: number): Promise<void> => {
+    const rect = pd.el.getBoundingClientRect();
+    addImageBox(new Uint8Array(await file.arrayBuffer()), file.type, pd, { leftPx: (clientX - rect.left) / displayZoom, topPx: (clientY - rect.top) / displayZoom, widthPx: 160 }, true);
+  };
+  // Drag-drop an image file onto a page to place it there.
+  root.addEventListener("dragover", (e) => {
+    if (!passwordProtected && e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) e.preventDefault();
+  });
+  root.addEventListener("drop", (e) => {
+    if (passwordProtected) return;
+    const file = Array.from(e.dataTransfer?.files ?? []).find((f) => /^image\//.test(f.type));
+    if (!file) return;
+    e.preventDefault();
+    const pageEl = (e.target as HTMLElement).closest(".pdfedit-page");
+    const pd = pageEls.find((p) => p.el === pageEl) ?? pageInView() ?? pageEls[0];
+    if (pd) void insertImageAt(file, pd, e.clientX, e.clientY);
+  });
+  // Paste an image from the clipboard onto the page in view.
+  wrap.addEventListener("paste", (e) => {
+    if (passwordProtected) return;
+    const file = Array.from(e.clipboardData?.items ?? []).find((it) => /^image\//.test(it.type))?.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    void insertImage(file);
+  });
+
   // Track the selection inside a paragraph so toolbar controls that steal focus
   // (color/font/size pickers) can restore it before applying, and reflect the caret's
   // style back into the toolbar fields.
