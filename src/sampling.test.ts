@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sampleColors, sampleRunStats } from "./sampling";
+import { sampleColors, sampleColorsFrom, sampleRunStats, sampleRunStatsFrom } from "./sampling";
 
 // A fake 2D context backed by an in-memory RGBA pixel buffer, so the pixel maths can be
 // exercised without a real canvas. `pixels` is row-major [r,g,b,a] per pixel.
@@ -57,6 +57,33 @@ describe("sampleColors", () => {
   it("falls back to black-on-white when getImageData throws (tainted canvas)", () => {
     const ctx = { canvas: { width: 10, height: 10 }, getImageData: () => { throw new Error("tainted"); } } as unknown as CanvasRenderingContext2D;
     expect(sampleColors(ctx, 0, 0, 10, 10)).toEqual({ fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 }, ink: 0 });
+  });
+});
+
+describe("sampleColorsFrom (page-buffer batch)", () => {
+  // A 20x20 page: white with a black square in the middle, so a sub-rect probe there sees ink.
+  const pageImg = (() => {
+    const px: number[] = [];
+    for (let r = 0; r < 20; r++)
+      for (let c = 0; c < 20; c++) {
+        const black = r >= 6 && r < 12 && c >= 6 && c < 12;
+        px.push(black ? 0 : 255, black ? 0 : 255, black ? 0 : 255, 255);
+      }
+    return { data: Uint8ClampedArray.from(px), width: 20, height: 20 };
+  })();
+
+  it("matches sampleColors on the same region of the same pixels", () => {
+    const ctx = ctxFrom(20, 20, Array.from(pageImg.data));
+    for (const [x, y, w, h] of [[6, 6, 6, 6], [0, 0, 20, 20], [4, 4, 10, 10], [15, 15, 100, 100]]) {
+      expect(sampleColorsFrom(pageImg, x!, y!, w!, h!)).toEqual(sampleColors(ctx, x!, y!, w!, h!));
+    }
+  });
+
+  it("sees the ink square as foreground/background", () => {
+    const s = sampleColorsFrom(pageImg, 4, 4, 12, 12);
+    expect(s.bg).toEqual({ r: 255, g: 255, b: 255 });
+    expect(s.fg).toEqual({ r: 0, g: 0, b: 0 });
+    expect(s.ink).toBeGreaterThan(0);
   });
 });
 

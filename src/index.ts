@@ -55,7 +55,7 @@ import {
   standardFont,
   STD_DROP_RE,
 } from "./style";
-import { sampleColors, sampleRunStats } from "./sampling";
+import { sampleColorsFrom, sampleRunStatsFrom, type PageImage } from "./sampling";
 import { layoutLine, wrapTokens } from "./layout";
 import { pxRectToPdfRect } from "./geometry";
 
@@ -802,7 +802,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     pageIndex: number,
     page: pdfjsLib.PDFPageProxy,
     viewport: pdfjsLib.PageViewport,
-    cctx: CanvasRenderingContext2D | null,
+    pageImg: PageImage | null,
     pageEl: HTMLElement,
   ): void => {
     const all = cols.flatMap((c) => c.items);
@@ -831,7 +831,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     const sLeft = Math.min(tr[0]!, bl[0]!); // original ink region, for colour sampling
     const sW = Math.abs(bl[0]! - tr[0]!);
     const sH = Math.abs(bl[1]! - tr[1]!);
-    const { fg, bg } = cctx ? sampleColors(cctx, sLeft, top, sW, sH) : { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 } };
+    const { fg, bg } = pageImg ? sampleColorsFrom(pageImg, sLeft, top, sW, sH) : { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 } };
     const fgHex = rgb255ToHex(fg);
 
     // Build styled spans column by column (right-to-left), glyphs top-to-bottom.
@@ -1537,6 +1537,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const cctx = canvas.getContext("2d");
       if (cctx) await page.render({ canvasContext: cctx, viewport, canvas }).promise;
       pageEl.insertBefore(canvas, pageEl.firstChild); // under any boxes added before the render
+      // Read the whole rendered page ONCE; every line/run colour probe below samples this
+      // buffer instead of doing its own getImageData (the dominant cost on text-dense pages).
+      let pageImg: PageImage | null = null;
+      try {
+        if (cctx) pageImg = cctx.getImageData(0, 0, canvas.width, canvas.height);
+      } catch {
+        /* tainted canvas: probes fall back to black-on-white */
+      }
 
       const content = await page.getTextContent();
       const allItems: RunItem[] = [];
@@ -1596,7 +1604,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
             .filter((g) => Math.abs(g.y - it.y) <= it.size * 0.4 && g.x + g.width / 2 >= it.x && g.x + g.width / 2 <= it.x + it.w)
             .sort((a, b) => a.x - b.x);
           if (here.length !== chars.length) continue; // mismatched mapping: leave un-anchored
-          const fg = cctx ? sampleRunStats(cctx, viewport, it.x, it.y, it.w, it.size).fg : { r: 0, g: 0, b: 0 };
+          const fg = pageImg ? sampleRunStatsFrom(pageImg, viewport, it.x, it.y, it.w, it.size).fg : { r: 0, g: 0, b: 0 };
           const color = { r: fg.r / 255, g: fg.g / 255, b: fg.b / 255 };
           it.anchors = here.map((g) => ({ fontRes: g.fontRes, hex: g.hex, width: g.width, size: g.size, color }));
           const st = fontStats.get(it.fontName) ?? { alnum: 0, total: 0 };
@@ -1635,7 +1643,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
 
       // Sample the background under a line so the grouper can split blocks that differ in
       // fill (e.g. a shaded table header above a white data cell), even when adjacent.
-      const bgOf = cctx
+      const bgOf = pageImg
         ? (ln: Line): RGB | null => {
             const a = viewport.convertToViewportPoint(ln.minX, ln.y + ln.size * 0.85);
             const b = viewport.convertToViewportPoint(ln.maxX, ln.y - ln.size * 0.3);
@@ -1644,7 +1652,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
             const w = Math.max(Math.abs(b[0]! - a[0]!), 2);
             const h = Math.max(Math.abs(b[1]! - a[1]!), 4);
             try {
-              return sampleColors(cctx, left, top, w, h).bg;
+              return pageImg ? sampleColorsFrom(pageImg, left, top, w, h).bg : null;
             } catch {
               return null;
             }
@@ -1653,7 +1661,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
 
       const visible = items.filter((it) => !it.invisible);
       if (detectVertical(visible)) {
-        for (const cols of buildVerticalBlocks(visible)) renderVerticalBlock(cols, p - 1, page, viewport, cctx, pageEl);
+        for (const cols of buildVerticalBlocks(visible)) renderVerticalBlock(cols, p - 1, page, viewport, pageImg, pageEl);
         upgradeOverlayFonts(paragraphs.slice(parasBefore));
         await applyDisplayFonts();
         return; // the page shell is already attached
@@ -1684,7 +1692,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const top = Math.min(tl[1]!, br[1]!);
         const dW = Math.abs(br[0]! - tl[0]!);
         const dH = Math.abs(br[1]! - tl[1]!);
-        const { fg, bg } = cctx ? sampleColors(cctx, left, top, dW, Math.max(size * scale * 1.2, 4)) : { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 } };
+        const { fg, bg } = pageImg ? sampleColorsFrom(pageImg, left, top, dW, Math.max(size * scale * 1.2, 4)) : { fg: { r: 0, g: 0, b: 0 }, bg: { r: 255, g: 255, b: 255 } };
         const origText = lines.map((l) => l.text).join(" ").replace(/\s+/g, " ").trim();
 
         // Reproduce per-run styling (bold/italic/family/size/color) as styled spans so
@@ -1747,8 +1755,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
               curRec = rec;
               curFontName = it.fontName;
               curSize = it.size;
-              if (cctx && it.str.trim() !== "") {
-                const st = sampleRunStats(cctx, viewport, it.x, it.y, it.w, it.size);
+              if (pageImg && it.str.trim() !== "") {
+                const st = sampleRunStatsFrom(pageImg, viewport, it.x, it.y, it.w, it.size);
                 if (perItemColor) curColor = rgb255ToHex(st.fg);
                 rec.inkSum = (rec.inkSum ?? 0) + st.ink;
                 rec.inkN = (rec.inkN ?? 0) + 1;
