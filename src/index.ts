@@ -131,12 +131,21 @@ export interface PdfImageState {
   topPx: number;
   widthPx: number;
 }
+/** An opaque white box the user drew to cover content, in viewport-space placement. */
+export interface PdfWhiteoutState {
+  page: number;
+  leftPx: number;
+  topPx: number;
+  widthPx: number;
+  heightPx: number;
+}
 export interface PdfEditState {
   /** The pristine bytes the document was opened with (re-render base). */
   original: Uint8Array;
   edits: PdfParagraphEdit[];
   boxes: PdfBoxState[];
   images: PdfImageState[];
+  whiteouts: PdfWhiteoutState[];
 }
 
 interface RGB {
@@ -197,6 +206,16 @@ interface ImageItem {
   page: number;
   bytes: Uint8Array;
   mime: string;
+  xPdf: number;
+  yPdf: number; // bottom-left, y-up
+  wPdf: number;
+  hPdf: number;
+  el: HTMLElement;
+  /** Stable per-instance identity for undo snapshots. */
+  uid?: number;
+}
+interface WhiteoutItem {
+  page: number;
   xPdf: number;
   yPdf: number; // bottom-left, y-up
   wPdf: number;
@@ -282,8 +301,24 @@ function injectStyles(): void {
       font:700 12px/14px system-ui, sans-serif; text-align:center;
     }
     .pdfedit-img:focus-visible { outline:2px solid #6e7bff; outline-offset:2px; }
+    .pdfedit-white {
+      position:absolute; cursor:move; background:#fff;
+      outline:1px dashed rgba(110,123,255,.9); box-sizing:border-box;
+    }
+    .pdfedit-white:focus-visible { outline:2px solid #6e7bff; outline-offset:2px; }
+    .pdfedit-white-handle {
+      position:absolute; right:-7px; bottom:-7px; width:14px; height:14px; box-sizing:border-box;
+      background:#6e7bff; border:2px solid #fff; border-radius:3px; cursor:nwse-resize;
+    }
+    .pdfedit-white-del {
+      position:absolute; right:-9px; top:-9px; width:18px; height:18px; box-sizing:border-box;
+      padding:0; background:#e4484f; color:#fff; border:2px solid #fff; border-radius:50%; cursor:pointer;
+      font:700 12px/14px system-ui, sans-serif; text-align:center;
+    }
+    .pdfedit-root.pdfedit-whiteout-mode .pdfedit-page { cursor:crosshair; }
+    .pdfedit-toolbar button.pdfedit-on { border-color:#6e7bff; background:#4a5170; }
     .pdfedit-toolbar button:focus-visible, .pdfedit-toolbar select:focus-visible,
-    .pdfedit-toolbar input:focus-visible, .pdfedit-img-del:focus-visible {
+    .pdfedit-toolbar input:focus-visible, .pdfedit-img-del:focus-visible, .pdfedit-white-del:focus-visible {
       outline:2px solid #fff; outline-offset:1px;
     }
   `;
@@ -333,6 +368,8 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   const original = bytes.slice();
   const paragraphs: Paragraph[] = [];
   const images: ImageItem[] = [];
+  const whiteouts: WhiteoutItem[] = [];
+  let whiteoutMode = false; // toolbar toggle: drag on a page draws a cover box
   // Off-screen aria-live region for status announcements (e.g. zoom level).
   const live = document.createElement("div");
   live.className = "pdfedit-live";
@@ -394,9 +431,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     size: number; align: Align; family: Family; colorHex: string; html: string;
   }
   interface UndoImg { uid: number; page: number; bytes: Uint8Array; mime: string; leftPx: number; topPx: number; widthPx: number }
-  interface UndoSnap { edits: UndoEdit[]; boxes: UndoBox[]; imgs: UndoImg[] }
+  interface UndoWhite { uid: number; page: number; leftPx: number; topPx: number; widthPx: number; heightPx: number }
+  interface UndoSnap { edits: UndoEdit[]; boxes: UndoBox[]; imgs: UndoImg[]; whites: UndoWhite[] }
   let paraSeq = 0;
   let imgSeq = 0;
+  let whiteSeq = 0;
 
   function takeSnapshot(): UndoSnap {
     const edits: UndoEdit[] = [];
@@ -421,10 +460,17 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       topPx: parseFloat(im.el.style.top) || 0,
       widthPx: im.el.offsetWidth || parseFloat(im.el.style.width) || 0,
     }));
-    return { edits, boxes, imgs };
+    const whites: UndoWhite[] = whiteouts.map((w) => ({
+      uid: w.uid ?? 0, page: w.page,
+      leftPx: parseFloat(w.el.style.left) || 0,
+      topPx: parseFloat(w.el.style.top) || 0,
+      widthPx: w.el.offsetWidth || parseFloat(w.el.style.width) || 0,
+      heightPx: w.el.offsetHeight || parseFloat(w.el.style.height) || 0,
+    }));
+    return { edits, boxes, imgs, whites };
   }
   const snapSig = (s: UndoSnap): string =>
-    JSON.stringify({ e: s.edits, b: s.boxes, i: s.imgs.map(({ bytes: _b, ...rest }) => rest) });
+    JSON.stringify({ e: s.edits, b: s.boxes, i: s.imgs.map(({ bytes: _b, ...rest }) => rest), w: s.whites });
   const history = new SnapHistory(takeSnapshot, snapSig);
 
   // Capture a paragraph's pristine overlay content while it is still clean, so undo
@@ -1264,6 +1310,21 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     });
     el.append(imageInput);
 
+    const whiteBtn = document.createElement("button");
+    whiteBtn.type = "button";
+    whiteBtn.textContent = t("whiteout");
+    whiteBtn.title = t("whiteoutTitle");
+    whiteBtn.setAttribute("aria-label", t("whiteoutTitle"));
+    whiteBtn.setAttribute("aria-pressed", "false");
+    keepSel(whiteBtn);
+    whiteBtn.addEventListener("click", () => {
+      whiteoutMode = !whiteoutMode;
+      whiteBtn.setAttribute("aria-pressed", String(whiteoutMode));
+      whiteBtn.classList.toggle("pdfedit-on", whiteoutMode);
+      root.classList.toggle("pdfedit-whiteout-mode", whiteoutMode);
+    });
+    el.append(whiteBtn);
+
     // Zoom: a slider + a percentage input, kept in sync. Scales the displayed pages only.
     el.append(sep());
     const zoomWrap = document.createElement("span");
@@ -1500,6 +1561,185 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     rec.hPdf = r.h;
   }
 
+  function updateWhiteoutRect(rec: WhiteoutItem, viewport: pdfjsLib.PageViewport): void {
+    const left = parseFloat(rec.el.style.left);
+    const top = parseFloat(rec.el.style.top);
+    const r = pxRectToPdfRect(left, top, rec.el.offsetWidth, rec.el.offsetHeight, viewport);
+    rec.xPdf = r.x;
+    rec.yPdf = r.y;
+    rec.wPdf = r.w;
+    rec.hPdf = r.h;
+  }
+
+  // Build a whiteout box (DOM + drag/resize/delete wiring). `place` restores a saved
+  // viewport-space rectangle; the box is an opaque white cover for the content beneath it.
+  function addWhiteoutBox(
+    target: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number },
+    place: { leftPx: number; topPx: number; widthPx: number; heightPx: number },
+    focus: boolean,
+  ): WhiteoutItem {
+    const box = document.createElement("div");
+    box.className = "pdfedit-white";
+    box.tabIndex = 0; // keyboard focusable
+    box.setAttribute("role", "group");
+    box.setAttribute("aria-label", t("whiteoutBoxAria"));
+    box.style.left = `${place.leftPx}px`;
+    box.style.top = `${place.topPx}px`;
+    box.style.width = `${place.widthPx}px`;
+    box.style.height = `${place.heightPx}px`;
+    const handle = document.createElement("div");
+    handle.className = "pdfedit-white-handle";
+    handle.title = t("dragResize");
+    handle.setAttribute("aria-hidden", "true"); // mouse affordance; keyboard uses +/- on the box
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "pdfedit-white-del";
+    del.textContent = "×";
+    del.title = t("deleteWhiteout");
+    del.setAttribute("aria-label", t("deleteWhiteout"));
+    box.append(handle, del);
+    target.el.appendChild(box);
+    const rec: WhiteoutItem = { page: target.index, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box, uid: ++whiteSeq };
+    whiteouts.push(rec);
+    updateWhiteoutRect(rec, target.viewport);
+    makeWhiteDraggable(box);
+    makeWhiteResizable(box, handle, rec);
+
+    const sync = () => {
+      const vp = pageViewportOf(box);
+      if (vp) updateWhiteoutRect(rec, vp);
+      change();
+    };
+    const removeWhiteout = () => {
+      box.remove();
+      const i = whiteouts.indexOf(rec);
+      if (i >= 0) whiteouts.splice(i, 1);
+      change();
+      history.commit(null);
+    };
+    const moveBy = (dx: number, dy: number) => {
+      box.style.left = `${parseFloat(box.style.left) + dx}px`;
+      box.style.top = `${parseFloat(box.style.top) + dy}px`;
+      sync();
+      history.commit("wmv:" + rec.uid); // a run of arrow presses undoes as one step
+    };
+    const resizeBy = (dw: number, dh: number) => {
+      box.style.width = `${Math.max(8, box.offsetWidth + dw)}px`;
+      box.style.height = `${Math.max(8, box.offsetHeight + dh)}px`;
+      sync();
+      history.commit("wrz:" + rec.uid);
+    };
+    del.addEventListener("pointerdown", (e) => e.stopPropagation());
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeWhiteout();
+    });
+    box.addEventListener("keydown", (e) => {
+      const step = e.shiftKey ? 20 : 5;
+      switch (e.key) {
+        case "ArrowLeft": e.preventDefault(); moveBy(-step, 0); break;
+        case "ArrowRight": e.preventDefault(); moveBy(step, 0); break;
+        case "ArrowUp": e.preventDefault(); moveBy(0, -step); break;
+        case "ArrowDown": e.preventDefault(); moveBy(0, step); break;
+        case "+": case "=": e.preventDefault(); resizeBy(e.shiftKey ? 40 : 10, e.shiftKey ? 40 : 10); break;
+        case "-": case "_": e.preventDefault(); resizeBy(e.shiftKey ? -40 : -10, e.shiftKey ? -40 : -10); break;
+        case "Delete": case "Backspace": e.preventDefault(); removeWhiteout(); break;
+      }
+    });
+    if (focus) box.focus();
+    change();
+    if (focus) history.commit(null);
+    return rec;
+  }
+
+  function makeWhiteDraggable(box: HTMLElement): void {
+    box.addEventListener("pointerdown", (e) => {
+      if (e.target !== box) return; // not on handle/delete
+      e.preventDefault();
+      e.stopPropagation(); // don't start a new whiteout draw underneath
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const left = parseFloat(box.style.left);
+      const top = parseFloat(box.style.top);
+      const move = (ev: PointerEvent) => {
+        box.style.left = `${left + (ev.clientX - startX) / displayZoom}px`;
+        box.style.top = `${top + (ev.clientY - startY) / displayZoom}px`;
+      };
+      const up = () => {
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", up);
+        const rec = whiteouts.find((r) => r.el === box);
+        const vp = pageViewportOf(box);
+        if (rec && vp) updateWhiteoutRect(rec, vp);
+        change();
+        history.commit(null);
+      };
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", up);
+    });
+  }
+
+  function makeWhiteResizable(box: HTMLElement, handle: HTMLElement, rec: WhiteoutItem): void {
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startW = box.offsetWidth;
+      const startH = box.offsetHeight;
+      const move = (ev: PointerEvent) => {
+        box.style.width = `${Math.max(8, startW + (ev.clientX - startX) / displayZoom)}px`;
+        box.style.height = `${Math.max(8, startH + (ev.clientY - startY) / displayZoom)}px`;
+      };
+      const up = () => {
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", up);
+        const vp = pageViewportOf(box);
+        if (vp) updateWhiteoutRect(rec, vp);
+        change();
+        history.commit(null);
+      };
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", up);
+    });
+  }
+
+  // Drag on a page (while whiteout mode is on) to rubber-band a new cover box into being.
+  function startWhiteoutDraw(target: { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number }, e: PointerEvent): void {
+    if (passwordProtected) return; // view-only: pdf-lib cannot re-save encrypted files
+    e.preventDefault();
+    const rect = target.el.getBoundingClientRect();
+    const startX = (e.clientX - rect.left) / displayZoom;
+    const startY = (e.clientY - rect.top) / displayZoom;
+    const rec = addWhiteoutBox(target, { leftPx: startX, topPx: startY, widthPx: 1, heightPx: 1 }, false);
+    const box = rec.el;
+    const move = (ev: PointerEvent) => {
+      const curX = (ev.clientX - rect.left) / displayZoom;
+      const curY = (ev.clientY - rect.top) / displayZoom;
+      box.style.left = `${Math.min(startX, curX)}px`;
+      box.style.top = `${Math.min(startY, curY)}px`;
+      box.style.width = `${Math.abs(curX - startX)}px`;
+      box.style.height = `${Math.abs(curY - startY)}px`;
+    };
+    const up = () => {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      // Discard a box too small to be a deliberate drag (e.g. a stray click).
+      if (box.offsetWidth < 6 || box.offsetHeight < 6) {
+        box.remove();
+        const i = whiteouts.indexOf(rec);
+        if (i >= 0) whiteouts.splice(i, 1);
+        return;
+      }
+      updateWhiteoutRect(rec, target.viewport);
+      box.focus();
+      change();
+      history.commit(null);
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+  }
+
   let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
   let passwordProtected = false;
   void (async () => {
@@ -1557,8 +1797,15 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const thisPageEl = pageEl;
       pageEl.addEventListener("dblclick", (e) => {
         const t2 = e.target as HTMLElement;
-        if (t2.closest(".pdfedit-para") || t2.closest(".pdfedit-img")) return;
+        if (t2.closest(".pdfedit-para") || t2.closest(".pdfedit-img") || t2.closest(".pdfedit-white")) return;
         addTextAt(thisPageEl, pageViewport, pageIndex, e.clientX, e.clientY);
+      });
+      // In whiteout mode, dragging on the page rubber-bands a new cover box.
+      pageEl.addEventListener("pointerdown", (e) => {
+        if (!whiteoutMode || e.button !== 0) return;
+        const t2 = e.target as HTMLElement;
+        if (t2.closest(".pdfedit-white")) return; // let an existing box handle its own drag
+        startWhiteoutDraw({ el: thisPageEl, viewport: pageViewport, index: pageIndex }, e);
       });
       root.appendChild(pageEl);
       pageData.push({ page, el: pageEl, viewport });
@@ -1916,6 +2163,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       for (const e2 of st.edits) needed.add(e2.page);
       for (const b of st.boxes) needed.add(b.page);
       for (const im of st.images) needed.add(im.page);
+      for (const w of st.whiteouts) needed.add(w.page);
       await Promise.all([...needed].map((i) => renderPage(i)));
       applyState(st);
       history.reset(); // the restored session is the undo baseline, not an undoable step
@@ -1974,7 +2222,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const target = pageEls.find((pe) => pe.index === im.page);
       if (target) addImageBox(im.bytes, im.mime, target, { leftPx: im.leftPx, topPx: im.topPx, widthPx: im.widthPx }, false);
     }
-    if (st.edits.length || st.boxes.length || st.images.length) options.onChange?.();
+    for (const w of st.whiteouts) {
+      const target = pageEls.find((pe) => pe.index === w.page);
+      if (target) addWhiteoutBox(target, { leftPx: w.leftPx, topPx: w.topPx, widthPx: w.widthPx, heightPx: w.heightPx }, false);
+    }
+    if (st.edits.length || st.boxes.length || st.images.length || st.whiteouts.length) options.onChange?.();
   }
 
   // Re-apply an undo snapshot by diffing it against the live state: paragraphs revert
@@ -2083,6 +2335,29 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const rec = addImageBox(w.bytes, w.mime, target, { leftPx: w.leftPx, topPx: w.topPx, widthPx: w.widthPx }, false);
       rec.uid = w.uid;
     }
+    const wantWhites = new Map(st.whites.map((w) => [w.uid, w]));
+    for (const wo of [...whiteouts]) {
+      const w = wantWhites.get(wo.uid ?? -1);
+      if (!w) {
+        wo.el.remove();
+        const i = whiteouts.indexOf(wo);
+        if (i >= 0) whiteouts.splice(i, 1);
+      } else {
+        wo.el.style.left = `${w.leftPx}px`;
+        wo.el.style.top = `${w.topPx}px`;
+        wo.el.style.width = `${w.widthPx}px`;
+        wo.el.style.height = `${w.heightPx}px`;
+        const vp = pageViewportOf(wo.el);
+        if (vp) updateWhiteoutRect(wo, vp);
+        wantWhites.delete(wo.uid ?? -1);
+      }
+    }
+    for (const w of wantWhites.values()) {
+      const target = pageEls.find((pe) => pe.index === w.page);
+      if (!target) continue;
+      const rec = addWhiteoutBox(target, { leftPx: w.leftPx, topPx: w.topPx, widthPx: w.widthPx, heightPx: w.heightPx }, false);
+      rec.uid = w.uid;
+    }
     // Put the caret at the end of the last text container the restore touched.
     if (focusEl) {
       focusEl.focus();
@@ -2126,7 +2401,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
 
   return {
     isDirty() {
-      return images.length > 0 || paragraphs.some((p) => p.dirty);
+      return images.length > 0 || whiteouts.length > 0 || paragraphs.some((p) => p.dirty);
     },
     getState(): PdfEditState {
       const edits: PdfParagraphEdit[] = [];
@@ -2158,7 +2433,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         topPx: parseFloat(im.el.style.top) || 0,
         widthPx: im.el.offsetWidth || parseFloat(im.el.style.width) || 0,
       }));
-      return { original: original.slice(), edits, boxes, images: imgs };
+      const whites: PdfWhiteoutState[] = whiteouts.map((w) => ({
+        page: w.page,
+        leftPx: parseFloat(w.el.style.left) || 0,
+        topPx: parseFloat(w.el.style.top) || 0,
+        widthPx: w.el.offsetWidth || parseFloat(w.el.style.width) || 0,
+        heightPx: w.el.offsetHeight || parseFloat(w.el.style.height) || 0,
+      }));
+      return { original: original.slice(), edits, boxes, images: imgs, whiteouts: whites };
     },
     undo() {
       doUndo();
@@ -2175,7 +2457,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     async getBytes() {
       if (passwordProtected) return original.slice(); // view-only (no decryption support)
       const editedParas = paragraphs.filter((p) => p.dirty);
-      if (editedParas.length === 0 && images.length === 0) return original.slice();
+      if (editedParas.length === 0 && images.length === 0 && whiteouts.length === 0) return original.slice();
       // ignoreEncryption: owner-password PDFs (print/copy restricted) render and edit
       // fine via pdf.js; without it pdf-lib throws here and the user's edits are lost.
       const pdf = await PDFDocument.load(original.slice(), { ignoreEncryption: true });
@@ -2339,6 +2621,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const runs = parseRuns(pp.el, base, scale);
         if (pp.vertical) await drawVerticalRuns(page, pp, runs, resolveToken);
         else await drawRuns(pdf, page, pp, runs, resolveToken);
+      }
+
+      // Whiteouts: opaque white cover rectangles, drawn over the original/edited content
+      // but under inserted images (a sticker placed on top stays visible).
+      for (const w of whiteouts) {
+        const page = pages[w.page];
+        if (!page || w.wPdf <= 0 || w.hPdf <= 0) continue;
+        page.drawRectangle({ x: w.xPdf, y: w.yPdf, width: w.wPdf, height: w.hPdf, color: rgb(1, 1, 1) });
       }
 
       for (const im of images) {

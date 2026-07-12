@@ -46,6 +46,10 @@ const en: Dict = {
   passwordNeeded: "This PDF is password-protected and cannot be opened without the password. Saving returns the file unchanged.",
   passwordViewOnly: "Password-protected PDF: view only. Editing encrypted files is not supported; saving returns the file unchanged.",
   renderFailed: "This PDF could not be displayed. It may be corrupted or password-protected. Saving returns the file unchanged.",
+  whiteout: "Whiteout",
+  whiteoutTitle: "Whiteout (drag on a page to cover content)",
+  whiteoutBoxAria: "Whiteout box. Arrow keys move it, plus and minus resize, Delete removes.",
+  deleteWhiteout: "Delete whiteout",
 };
 
 const fr: Dict = {
@@ -88,6 +92,10 @@ const fr: Dict = {
   passwordNeeded: "Ce PDF est protégé par mot de passe et ne peut pas être ouvert sans celui-ci. L'enregistrement renvoie le fichier inchangé.",
   passwordViewOnly: "PDF protégé par mot de passe : affichage seul. L'édition de fichiers chiffrés n'est pas prise en charge ; l'enregistrement renvoie le fichier inchangé.",
   renderFailed: "Ce PDF n'a pas pu être affiché. Il est peut-être corrompu ou protégé par mot de passe. L'enregistrement renvoie le fichier inchangé.",
+  whiteout: "Cache-blanc",
+  whiteoutTitle: "Cache-blanc (glisser sur une page pour masquer le contenu)",
+  whiteoutBoxAria: "Cache-blanc. Les flèches le déplacent, plus et moins le redimensionnent, Suppr le retire.",
+  deleteWhiteout: "Supprimer le cache-blanc",
 };
 
 const ja: Dict = {
@@ -130,6 +138,10 @@ const ja: Dict = {
   passwordNeeded: "この PDF はパスワードで保護されており、パスワードなしでは開けません。保存してもファイルは変更されません。",
   passwordViewOnly: "パスワード保護された PDF：表示のみ。暗号化ファイルの編集には対応していません。保存してもファイルは変更されません。",
   renderFailed: "この PDF は表示できませんでした。破損しているか、パスワードで保護されている可能性があります。保存してもファイルは変更されません。",
+  whiteout: "白塗り",
+  whiteoutTitle: "白塗り（ページ上でドラッグして内容を隠します）",
+  whiteoutBoxAria: "白塗りボックス。矢印キーで移動、プラスとマイナスでサイズ変更、Delete で削除します。",
+  deleteWhiteout: "白塗りを削除",
 };
 
 const LOCALES: Record<string, Dict> = { en, fr, ja };
