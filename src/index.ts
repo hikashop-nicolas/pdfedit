@@ -724,6 +724,22 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   root.addEventListener("touchend", endPinch);
   root.addEventListener("touchcancel", endPinch);
 
+  // Ctrl/Cmd + wheel zooms (also the gesture a trackpad pinch fires as a ctrl-wheel), so the
+  // browser's own page zoom is suppressed and the document zoom is used instead.
+  root.addEventListener(
+    "wheel",
+    (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const cur = Math.round(displayZoom * 100);
+      // Scale by the wheel delta; a notch (~100px) is ~10%. Clamp per-event so a fast flick
+      // does not overshoot the whole range at once.
+      const factor = Math.exp(-Math.max(-40, Math.min(40, e.deltaY)) / 300);
+      toolbar.setZoom(cur * factor);
+    },
+    { passive: false },
+  );
+
   // Track the selection inside a paragraph so toolbar controls that steal focus
   // (color/font/size pickers) can restore it before applying, and reflect the caret's
   // style back into the toolbar fields.

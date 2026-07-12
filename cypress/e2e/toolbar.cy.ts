@@ -90,6 +90,24 @@ describe("pdfedit toolbar", () => {
     cy.get(".pdfedit-zoom input[type=number]").should("have.value", "50");
   });
 
+  it("zooms with Ctrl/Cmd + wheel", () => {
+    openFixture();
+    cy.get(".pdfedit-zoom input[type=number]").clear().type("100{enter}");
+    // Wheel up (negative deltaY) with ctrl held zooms in past 100%.
+    cy.get(".pdfedit-page").first().trigger("wheel", { deltaY: -120, ctrlKey: true, force: true });
+    cy.get(".pdfedit-zoom input[type=number]").invoke("val").then((v) => expect(Number(v)).to.be.greaterThan(100));
+    // Wheel down zooms back out below the raised level.
+    cy.get(".pdfedit-zoom input[type=number]").invoke("val").then((up) => {
+      cy.get(".pdfedit-page").first().trigger("wheel", { deltaY: 120, ctrlKey: true, force: true });
+      cy.get(".pdfedit-zoom input[type=number]").invoke("val").then((down) => expect(Number(down)).to.be.lessThan(Number(up)));
+    });
+    // A plain wheel (no modifier) must NOT change the zoom.
+    cy.get(".pdfedit-zoom input[type=number]").invoke("val").then((before) => {
+      cy.get(".pdfedit-page").first().trigger("wheel", { deltaY: -120, force: true });
+      cy.get(".pdfedit-zoom input[type=number]").should("have.value", String(before));
+    });
+  });
+
   it("remembers the zoom level across a reload (localStorage)", () => {
     openFixture();
     cy.get(".pdfedit-zoom input[type=number]").clear().type("175{enter}");
