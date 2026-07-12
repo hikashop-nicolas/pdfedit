@@ -56,6 +56,7 @@ import {
   STD_DROP_RE,
 } from "./style";
 import { sampleColors, sampleRunStats } from "./sampling";
+import { layoutLine, wrapTokens } from "./layout";
 
 // pdfedit: a standalone, framework-agnostic PDF editor.
 //
@@ -2450,37 +2451,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     }
 
     // Wrap into lines.
-    const lines: Tok[][] = [];
-    let cur: Tok[] = [];
-    let curW = 0;
-    const flush = () => {
-      while (cur.length && cur[cur.length - 1]!.space) cur.pop();
-      lines.push(cur);
-      cur = [];
-      curW = 0;
-    };
-    toks.forEach((t, i) => {
-      if (lineBreaks.includes(i)) flush();
-      if (!t.space && cur.length && curW + t.w > pp.w) flush();
-      if (t.space && cur.length === 0) return;
-      cur.push(t);
-      curW += t.w;
-    });
-    if (cur.length) flush();
+    const lines = wrapTokens(toks, lineBreaks, pp.w);
 
     const lastIdx = lines.length - 1;
     let y = pp.firstBaseline;
     lines.forEach((line, li) => {
-      const lineW = line.reduce((a, t) => a + t.w, 0);
       const lineSize = Math.max(pp.size, ...line.map((t) => t.run.size));
-      let x = pp.x;
-      let spaceExtra = 0;
-      if (pp.align === "center") x = pp.x + (pp.w - lineW) / 2;
-      else if (pp.align === "right") x = pp.x + pp.w - lineW;
-      else if (pp.align === "justify" && li !== lastIdx) {
-        const nSpaces = line.filter((t) => t.space).length;
-        if (nSpaces > 0 && pp.w > lineW) spaceExtra = (pp.w - lineW) / nSpaces;
-      }
+      const { x: startX, spaceExtra } = layoutLine(line, pp.align, pp.x, pp.w, li === lastIdx);
+      let x = startX;
       for (const t of line) {
         if (!t.space) {
           try {
