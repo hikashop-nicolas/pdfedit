@@ -100,6 +100,25 @@ export interface PdfEditor {
   redo(): void;
   canUndo(): boolean;
   canRedo(): boolean;
+  /** The edits made on top of the base file, for a host to seed a session from. */
+  getSnapshot(): PdfSnapshot;
+  /**
+   * Be told what this person changed, or pass null to stop.
+   *
+   * A subscription rather than an option, like the rest of the collaboration surface:
+   * building the snapshot on every keystroke is not a price an unshared document pays.
+   */
+  setChangeReporter(handler: ((snap: PdfSnapshot) => void) | null): void;
+  /** Put a peer's edits on screen. Does not report back, and does not move the caret. */
+  applyRemote(snap: PdfSnapshot): void;
+  /**
+   * Hand undo and redo to the host, or pass null to take them back.
+   *
+   * A collaboration session must do this. This editor's undo restores a whole-document
+   * snapshot, so once a peer's edit has landed, undoing would revert THEIR work along with
+   * yours and the two documents would silently diverge.
+   */
+  setUndoHandler(handler: PdfUndoHandler | null): void;
   destroy(): void;
 }
 
@@ -112,6 +131,8 @@ export interface PdfParagraphEdit {
 }
 /** A text box the user added in blank space. */
 export interface PdfBoxState {
+  /** Unique across peers, so two people's added boxes never collide. */
+  id: string;
   page: number;
   xPdf: number;
   yPdf: number;
@@ -124,6 +145,7 @@ export interface PdfBoxState {
 }
 /** An inserted image, with its viewport-space placement (render scale is constant per doc). */
 export interface PdfImageState {
+  id: string;
   page: number;
   bytes: Uint8Array;
   mime: string;
@@ -133,12 +155,38 @@ export interface PdfImageState {
 }
 /** An opaque white box the user drew to cover content, in viewport-space placement. */
 export interface PdfWhiteoutState {
+  id: string;
   page: number;
   leftPx: number;
   topPx: number;
   widthPx: number;
   heightPx: number;
 }
+/** Undo and redo owned by someone else. See PdfEditor.setUndoHandler. */
+export interface PdfUndoHandler {
+  undo(): void;
+  redo(): void;
+  canUndo(): boolean;
+  canRedo(): boolean;
+}
+
+/**
+ * What a collaboration host needs: the edits made on top of the base file, and nothing of
+ * the base file itself.
+ *
+ * Deliberately not PdfEditState. That one carries `original` (megabytes, identical on every
+ * peer, already transferred once) and copies every image's bytes, which would make a
+ * per-keystroke report cost more than the edit it describes. This carries only the dirty
+ * paragraphs and the added objects, and hands image bytes out by reference: the caller must
+ * not mutate them.
+ */
+export interface PdfSnapshot {
+  edits: PdfParagraphEdit[];
+  boxes: PdfBoxState[];
+  images: PdfImageState[];
+  whiteouts: PdfWhiteoutState[];
+}
+
 export interface PdfEditState {
   /** The pristine bytes the document was opened with (re-render base). */
   original: Uint8Array;
@@ -190,8 +238,9 @@ interface Paragraph {
   glyphPreserve: boolean;
   /** Added by the user in blank space (no original content to cover / preserve). */
   isNew?: boolean;
-  /** Stable per-instance identity for undo snapshots (assigned in wirePara). */
-  uid?: number;
+  /** Stable identity for undo snapshots and for naming this object to a peer
+   *  (assigned in wirePara). */
+  uid?: string;
   /** Pristine overlay HTML/alignment, captured while clean, for undo back to unedited. */
   origHtml?: string;
   origAlign?: Align;
@@ -215,8 +264,8 @@ interface ImageItem {
   wPdf: number;
   hPdf: number;
   el: HTMLElement;
-  /** Stable per-instance identity for undo snapshots. */
-  uid?: number;
+  /** Stable identity for undo snapshots and for naming this object to a peer. */
+  uid?: string;
 }
 interface WhiteoutItem {
   page: number;
@@ -225,8 +274,8 @@ interface WhiteoutItem {
   wPdf: number;
   hPdf: number;
   el: HTMLElement;
-  /** Stable per-instance identity for undo snapshots. */
-  uid?: number;
+  /** Stable identity for undo snapshots and for naming this object to a peer. */
+  uid?: string;
 }
 
 const ICON = {
@@ -420,7 +469,17 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   let activePara: Paragraph | null = null;
   let savedPara: Paragraph | null = null;
   let savedRange: Range | null = null;
-  const change = () => options.onChange?.();
+  /** Set while a peer's change is being applied, so it is neither echoed nor obtrusive. */
+  let applyingRemote = false;
+  /** Set while a session owns undo. Null means this editor's own snapshot history. */
+  let undoHandler: PdfUndoHandler | null = null;
+  /** Told what changed locally, while a session wants to know. */
+  let changeReporter: ((snap: PdfSnapshot) => void) | null = null;
+
+  const change = () => {
+    options.onChange?.();
+    if (changeReporter && !applyingRemote) changeReporter(publicSnapshot(takeSnapshot()));
+  };
   const touch = () => {
     if (activePara) {
       activePara.dirty = true;
@@ -435,15 +494,37 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   // bytes) plus stable uids so restore can diff instead of rebuilding everything.
   interface UndoEdit { page: number; index: number; html: string; align: Align }
   interface UndoBox {
-    uid: number; page: number; xPdf: number; yPdf: number; wPdf: number;
+    uid: string; page: number; xPdf: number; yPdf: number; wPdf: number;
     size: number; align: Align; family: Family; colorHex: string; html: string;
   }
-  interface UndoImg { uid: number; page: number; bytes: Uint8Array; mime: string; leftPx: number; topPx: number; widthPx: number }
-  interface UndoWhite { uid: number; page: number; leftPx: number; topPx: number; widthPx: number; heightPx: number }
+  interface UndoImg { uid: string; page: number; bytes: Uint8Array; mime: string; leftPx: number; topPx: number; widthPx: number }
+  interface UndoWhite { uid: string; page: number; leftPx: number; topPx: number; widthPx: number; heightPx: number }
   interface UndoSnap { edits: UndoEdit[]; boxes: UndoBox[]; imgs: UndoImg[]; whites: UndoWhite[] }
-  let paraSeq = 0;
-  let imgSeq = 0;
-  let whiteSeq = 0;
+  // Object ids have to be unique across PEERS, not merely within this editor: a counter
+  // would have two people both call their first added box "1", and each would take the
+  // other's box for its own. Random suffix, same shape as richdoc's block ids.
+  let objSeq = 0;
+  const newObjectId = (): string => {
+    objSeq += 1;
+    const salt = new Uint8Array(3);
+    crypto.getRandomValues(salt);
+    return `o${objSeq.toString(36)}${[...salt].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+  };
+
+  /** The internal snapshot in the public vocabulary: uid becomes id, imgs becomes images. */
+  const publicSnapshot = (s: UndoSnap): PdfSnapshot => ({
+    edits: s.edits,
+    boxes: s.boxes.map(({ uid, ...rest }) => ({ id: uid, ...rest })),
+    images: s.imgs.map(({ uid, ...rest }) => ({ id: uid, ...rest })),
+    whiteouts: s.whites.map(({ uid, ...rest }) => ({ id: uid, ...rest })),
+  });
+
+  const internalSnapshot = (s: PdfSnapshot): UndoSnap => ({
+    edits: s.edits.map((e) => ({ ...e, align: e.align ?? "left" })),
+    boxes: s.boxes.map(({ id, ...rest }) => ({ uid: id, ...rest })),
+    imgs: s.images.map(({ id, ...rest }) => ({ uid: id, ...rest })),
+    whites: s.whiteouts.map(({ id, ...rest }) => ({ uid: id, ...rest })),
+  });
 
   function takeSnapshot(): UndoSnap {
     const edits: UndoEdit[] = [];
@@ -457,19 +538,19 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     const boxes: UndoBox[] = paragraphs
       .filter((p) => p.isNew)
       .map((p) => ({
-        uid: p.uid ?? 0, page: p.page, xPdf: p.x, yPdf: p.topY, wPdf: p.w, size: p.size,
+        uid: p.uid ?? "", page: p.page, xPdf: p.x, yPdf: p.topY, wPdf: p.w, size: p.size,
         align: p.align, family: p.family,
         colorHex: rgb255ToHex({ r: p.color.r * 255, g: p.color.g * 255, b: p.color.b * 255 }),
         html: p.el.innerHTML,
       }));
     const imgs: UndoImg[] = images.map((im) => ({
-      uid: im.uid ?? 0, page: im.page, bytes: im.bytes, mime: im.mime,
+      uid: im.uid ?? "", page: im.page, bytes: im.bytes, mime: im.mime,
       leftPx: parseFloat(im.el.style.left) || 0,
       topPx: parseFloat(im.el.style.top) || 0,
       widthPx: im.el.offsetWidth || parseFloat(im.el.style.width) || 0,
     }));
     const whites: UndoWhite[] = whiteouts.map((w) => ({
-      uid: w.uid ?? 0, page: w.page,
+      uid: w.uid ?? "", page: w.page,
       leftPx: parseFloat(w.el.style.left) || 0,
       topPx: parseFloat(w.el.style.top) || 0,
       widthPx: w.el.offsetWidth || parseFloat(w.el.style.width) || 0,
@@ -850,7 +931,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   // Attach the editing behaviour (active state, selection retention, dirty tracking) to a
   // paragraph's element. Used for both extracted paragraphs and ones added in blank space.
   const wirePara = (para: Paragraph): void => {
-    if (para.uid == null) para.uid = ++paraSeq;
+    if (para.uid == null) para.uid = newObjectId();
     const el = para.el;
     el.addEventListener("focus", () => {
       rememberPristine(para);
@@ -1454,7 +1535,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     del.setAttribute("aria-label", t("deleteImage"));
     box.append(img, handle, del);
     target.el.appendChild(box);
-    const rec: ImageItem = { page: target.index, bytes: bytesImg, mime, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box, uid: ++imgSeq };
+    const rec: ImageItem = { page: target.index, bytes: bytesImg, mime, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box, uid: newObjectId() };
     images.push(rec);
     img.addEventListener("load", () => updateImageRect(rec, target.viewport), { once: true });
     makeDraggable(box);
@@ -1607,7 +1688,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     del.setAttribute("aria-label", t("deleteWhiteout"));
     box.append(handle, del);
     target.el.appendChild(box);
-    const rec: WhiteoutItem = { page: target.index, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box, uid: ++whiteSeq };
+    const rec: WhiteoutItem = { page: target.index, xPdf: 0, yPdf: 0, wPdf: 0, hPdf: 0, el: box, uid: newObjectId() };
     whiteouts.push(rec);
     updateWhiteoutRect(rec, target.viewport);
     makeWhiteDraggable(box);
@@ -2372,7 +2453,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     const wantBoxes = new Map(st.boxes.map((b) => [b.uid, b]));
     for (const p of [...paragraphs]) {
       if (!p.isNew) continue;
-      const b = wantBoxes.get(p.uid ?? -1);
+      const b = wantBoxes.get(p.uid ?? "");
       if (!b) {
         p.el.remove();
         const i = paragraphs.indexOf(p);
@@ -2393,7 +2474,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         }
         p.dirty = b.html !== "";
         p.el.classList.toggle("pdfedit-edited", p.dirty);
-        wantBoxes.delete(p.uid ?? -1);
+        wantBoxes.delete(p.uid ?? "");
       }
     }
     for (const b of wantBoxes.values()) {
@@ -2408,7 +2489,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     }
     const wantImgs = new Map(st.imgs.map((i) => [i.uid, i]));
     for (const im of [...images]) {
-      const w = wantImgs.get(im.uid ?? -1);
+      const w = wantImgs.get(im.uid ?? "");
       if (!w) {
         const src = im.el.querySelector("img")?.src;
         if (src?.startsWith("blob:")) URL.revokeObjectURL(src);
@@ -2421,7 +2502,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         im.el.style.width = `${w.widthPx}px`;
         const vp = pageViewportOf(im.el);
         if (vp) updateImageRect(im, vp);
-        wantImgs.delete(im.uid ?? -1);
+        wantImgs.delete(im.uid ?? "");
       }
     }
     for (const w of wantImgs.values()) {
@@ -2432,7 +2513,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     }
     const wantWhites = new Map(st.whites.map((w) => [w.uid, w]));
     for (const wo of [...whiteouts]) {
-      const w = wantWhites.get(wo.uid ?? -1);
+      const w = wantWhites.get(wo.uid ?? "");
       if (!w) {
         wo.el.remove();
         const i = whiteouts.indexOf(wo);
@@ -2444,7 +2525,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         wo.el.style.height = `${w.heightPx}px`;
         const vp = pageViewportOf(wo.el);
         if (vp) updateWhiteoutRect(wo, vp);
-        wantWhites.delete(wo.uid ?? -1);
+        wantWhites.delete(wo.uid ?? "");
       }
     }
     for (const w of wantWhites.values()) {
@@ -2453,8 +2534,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const rec = addWhiteoutBox(target, { leftPx: w.leftPx, topPx: w.topPx, widthPx: w.widthPx, heightPx: w.heightPx }, false);
       rec.uid = w.uid;
     }
-    // Put the caret at the end of the last text container the restore touched.
-    if (focusEl) {
+    // Put the caret at the end of the last text container the restore touched. Undo wants
+    // that: it shows you what came back. A peer's edit must not, or every keystroke of
+    // theirs would drag this person's cursor into the paragraph they are typing in.
+    if (focusEl && !applyingRemote) {
       focusEl.focus();
       const sel = document.getSelection();
       if (sel) {
@@ -2467,11 +2550,16 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     }
   }
 
+  // Every way of undoing goes through these: the toolbar buttons, the keyboard shortcut
+  // and the public API. So the session's claim on undo is made once, here, and no path
+  // can reach the snapshot history behind its back and take back a peer's work.
   function doUndo(): void {
+    if (undoHandler) return void undoHandler.undo();
     const s = history.undo();
     if (s) applySnapshot(s);
   }
   function doRedo(): void {
+    if (undoHandler) return void undoHandler.redo();
     const s = history.redo();
     if (s) applySnapshot(s);
   }
@@ -2510,6 +2598,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const boxes: PdfBoxState[] = paragraphs
         .filter((p) => p.isNew)
         .map((p) => ({
+          id: p.uid ?? "",
           page: p.page,
           xPdf: p.x,
           yPdf: p.topY,
@@ -2521,6 +2610,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
           html: p.el.innerHTML,
         }));
       const imgs: PdfImageState[] = images.map((im) => ({
+        id: im.uid ?? "",
         page: im.page,
         bytes: im.bytes.slice(),
         mime: im.mime,
@@ -2529,6 +2619,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         widthPx: im.el.offsetWidth || parseFloat(im.el.style.width) || 0,
       }));
       const whites: PdfWhiteoutState[] = whiteouts.map((w) => ({
+        id: w.uid ?? "",
         page: w.page,
         leftPx: parseFloat(w.el.style.left) || 0,
         topPx: parseFloat(w.el.style.top) || 0,
@@ -2537,6 +2628,27 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       }));
       return { original: original.slice(), edits, boxes, images: imgs, whiteouts: whites };
     },
+    getSnapshot(): PdfSnapshot {
+      return publicSnapshot(takeSnapshot());
+    },
+    setChangeReporter(handler) {
+      changeReporter = handler;
+    },
+    applyRemote(snap: PdfSnapshot) {
+      applyingRemote = true;
+      try {
+        applySnapshotInner(internalSnapshot(snap));
+        // Through the same path a local edit takes, so the host still learns the document
+        // changed. The applyingRemote flag is the single thing that stops it being
+        // announced back to the peer whose edit it was.
+        change();
+      } finally {
+        applyingRemote = false;
+      }
+    },
+    setUndoHandler(handler) {
+      undoHandler = handler;
+    },
     undo() {
       doUndo();
     },
@@ -2544,10 +2656,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       doRedo();
     },
     canUndo() {
-      return history.canUndo;
+      return undoHandler ? undoHandler.canUndo() : history.canUndo;
     },
     canRedo() {
-      return history.canRedo;
+      return undoHandler ? undoHandler.canRedo() : history.canRedo;
     },
     async getBytes() {
       if (passwordProtected) return original.slice(); // view-only (no decryption support)

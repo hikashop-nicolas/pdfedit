@@ -13,6 +13,9 @@ let filename = "edited.pdf";
 // which the simple demo UI doesn't otherwise surface.
 (window as unknown as { __pdfeditDemo: unknown }).__pdfeditDemo = {
   getEditor: () => editor,
+  /** The factory and its worker, so a test can build a second editor beside this one. */
+  createPdfEditor,
+  workerSrc: workerUrl,
   restore: (state: unknown) => {
     editor?.destroy();
     editorEl.innerHTML = "";
