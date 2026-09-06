@@ -7,6 +7,10 @@ in the browser. No server, no upload, no tracking.
 **[▶ Live demo](https://hikashop-nicolas.github.io/pdfedit/)** — open a PDF, edit the text,
 and download the result, all in your browser.
 
+Used in production by **[Omnitext](https://hikashop-nicolas.github.io/omnitext/)**, a free
+browser editor for practically any file, as its
+[PDF editor](https://hikashop-nicolas.github.io/omnitext/formats/pdf.html).
+
 ```ts
 import { createPdfEditor } from "pdfedit";
 import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url"; // your bundler resolves this
