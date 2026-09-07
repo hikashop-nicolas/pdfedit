@@ -42,6 +42,8 @@ editor.destroy();                            // tear down
   a display font from the embedded outlines when a font's own encoding can't be used in
   HTML), and omits text the PDF draws invisibly (white fill / render mode 3).
 - **Accessible** — labelled toolbar, keyboard-operable image boxes, visible focus rings.
+- **Multilingual** — the UI is available in English, French, Japanese, Spanish, German, Portuguese, Russian and Simplified Chinese,
+  auto-detected from the browser with an English fallback, and `setLocale()` to force one.
 
 Runtime dependencies: `pdfjs-dist`, `pdf-lib`, `@pdf-lib/fontkit`, `opentype.js`. The
 heavier pieces (the content-stream glyph engine and the display-font builder) load on
