@@ -20,6 +20,7 @@ import {
   StandardFonts,
   rgb,
 } from "pdf-lib";
+import { fitZoomPct } from "./zoom";
 import { type PlacedGlyph } from "./content-stream";
 import { type Anchor, planEditedBlock } from "./glyph-edit";
 import { pageGlyphs } from "./pdf-glyphs";
@@ -390,14 +391,16 @@ function injectStyles(): void {
 // Persist the zoom level (a UI preference) across documents/sessions. Guarded so it is a
 // no-op where localStorage is unavailable (privacy mode / non-browser).
 const ZOOM_KEY = "pdfedit:zoom";
-const loadZoomPct = (): number => {
+/** The zoom the user last chose, or null when they never chose one (or it cannot be read). */
+const loadZoomPct = (): number | null => {
   try {
-    const v = Number(localStorage.getItem(ZOOM_KEY));
+    const raw = localStorage.getItem(ZOOM_KEY);
+    const v = raw == null ? NaN : Number(raw);
     if (Number.isFinite(v) && v >= 25 && v <= 400) return v;
   } catch {
     /* ignore */
   }
-  return 100;
+  return null;
 };
 const saveZoomPct = (pct: number): void => {
   try {
@@ -439,7 +442,9 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
   const pageCanvasEls: (HTMLCanvasElement | null)[] = [];
   const overlayBuilt: boolean[] = [];
   let pageObserver: IntersectionObserver | null = null;
-  let displayZoom = loadZoomPct() / 100; // visual zoom only (persisted); render scale + PDF coords unchanged
+  const savedZoomPct = loadZoomPct();
+  let displayZoom = (savedZoomPct ?? 100) / 100; // visual zoom only (persisted); render scale + PDF coords unchanged
+  // No zoom chosen yet: the first page opens fitted to the width it has (see fitZoomPct).
   const applyZoom = (z: number) => {
     // Anchor the page under the viewport centre so it stays put across the zoom change;
     // otherwise scrollTop is a fixed number while page heights change and the view jumps
@@ -1442,12 +1447,13 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     znum.setAttribute("aria-label", t("zoomPctAria"));
     const zpct = document.createElement("span");
     zpct.textContent = "%";
-    const setZoom = (pct: number) => {
+    /** persist=false for a zoom the editor picked itself (fit on open), which is not a preference. */
+    const setZoom = (pct: number, persist = true) => {
       const p = Math.max(25, Math.min(400, Math.round(pct || 100)));
       zrange.value = String(p);
       znum.value = String(p);
       applyZoom(p / 100);
-      saveZoomPct(p);
+      if (persist) saveZoomPct(p);
       live.textContent = `${t("zoom")} ${p}%`;
     };
     zrange.addEventListener("input", () => setZoom(Number(zrange.value)));
@@ -1902,6 +1908,14 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       });
       root.appendChild(pageEl);
       pageData.push({ page, el: pageEl, viewport });
+    }
+    // With no zoom chosen, fit the first page to the width it has. On a phone a page at 100% was
+    // wider than the screen and cut off on the right. Not saved: it is a fit, not a preference, so
+    // a wider window or a rotated phone gets its own fit next time.
+    if (savedZoomPct == null && pageData[0] && !destroyed) {
+      const cs = getComputedStyle(root);
+      const avail = root.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+      toolbar.setZoom(fitZoomPct(avail, pageData[0].viewport.width), false);
     }
     // Draw (or redraw) a page's raster canvas and return the sampled image buffer. Split
     // from the overlay build so an evicted page can restore its canvas without rebuilding
