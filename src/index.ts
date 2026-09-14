@@ -294,43 +294,47 @@ function injectStyles(): void {
   const s = document.createElement("style");
   s.id = STYLE_ID;
   s.textContent = `
+    /* Chrome colours come from custom properties, so a host can theme the editor (light, dark, its
+       own brand). Each falls back to the dark palette pdfedit has always had, so nothing changes
+       for a page that sets none: --pdfedit-chrome, -chrome2, -border, -text, -muted, -btn,
+       -btn-border, -input-bg, -accent, -on, -on-text, and -desk (the area around the pages). */
     .pdfedit-wrap { display:flex; flex-direction:column; height:100%; }
     .pdfedit-error { background:#7a2b2b; color:#ffd7d7; padding:10px 14px; font:13px/1.5 system-ui,sans-serif; border-radius:6px; margin:10px; }
     .pdfedit-note { background:#5c4a1f; color:#ffe9b3; padding:8px 14px; font:13px/1.5 system-ui,sans-serif; border-radius:6px; margin:10px; }
-    .pdfedit-findbar { display:flex; align-items:center; gap:6px; padding:5px 10px; background:#23262c; border-bottom:1px solid #1c1f24; }
+    .pdfedit-findbar { display:flex; align-items:center; gap:6px; padding:5px 10px; background:var(--pdfedit-chrome2, #23262c); border-bottom:1px solid var(--pdfedit-border, #1c1f24); }
     .pdfedit-findbar[hidden] { display:none; }
-    .pdfedit-findbar input { flex:0 1 260px; background:#1c1f24; border:1px solid #3a4047; border-radius:5px; color:#e7eaf0; font:13px system-ui,sans-serif; padding:4px 8px; }
-    .pdfedit-findbar button { background:#3a3f47; color:#e6e6e6; border:1px solid #4a4f57; border-radius:5px; font:13px/1.2 system-ui,sans-serif; padding:3px 9px; cursor:pointer; }
-    .pdfedit-findcount { color:#aab2bf; font:12px system-ui,sans-serif; min-width:70px; }
+    .pdfedit-findbar input { flex:0 1 260px; background:var(--pdfedit-input-bg, #1c1f24); border:1px solid var(--pdfedit-btn-border, #3a4047); border-radius:5px; color:var(--pdfedit-text, #e7eaf0); font:13px system-ui,sans-serif; padding:4px 8px; }
+    .pdfedit-findbar button { background:var(--pdfedit-btn, #3a3f47); color:var(--pdfedit-text, #e6e6e6); border:1px solid var(--pdfedit-btn-border, #4a4f57); border-radius:5px; font:13px/1.2 system-ui,sans-serif; padding:3px 9px; cursor:pointer; }
+    .pdfedit-findcount { color:var(--pdfedit-muted, #aab2bf); font:12px system-ui,sans-serif; min-width:70px; }
     .pdfedit-find-hl { position:absolute; z-index:4; pointer-events:none; background:rgba(255,213,0,.35); border-radius:2px; }
     .pdfedit-find-hl.is-current { background:rgba(255,140,0,.5); outline:2px solid rgba(255,140,0,.9); }
 .pdfedit-live { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); border:0; }
     .pdfedit-toolbar {
       display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:6px 10px;
-      background:#2b2f36; border-bottom:1px solid #1c1f24; color:#e6e6e6;
+      background:var(--pdfedit-chrome, #2b2f36); border-bottom:1px solid var(--pdfedit-border, #1c1f24); color:var(--pdfedit-text, #e6e6e6);
       font:13px system-ui, sans-serif;
     }
     .pdfedit-toolbar button, .pdfedit-toolbar select, .pdfedit-toolbar input[type=number] {
-      font:inherit; background:#3a3f47; color:#e6e6e6; border:1px solid #4a4f57;
+      font:inherit; background:var(--pdfedit-btn, #3a3f47); color:var(--pdfedit-text, #e6e6e6); border:1px solid var(--pdfedit-btn-border, #4a4f57);
       border-radius:5px; padding:3px 8px; cursor:pointer; height:28px; box-sizing:border-box;
     }
     .pdfedit-toolbar button { display:inline-flex; align-items:center; justify-content:center; min-width:30px; }
-    .pdfedit-toolbar button:hover, .pdfedit-toolbar select:hover { border-color:#6e7bff; }
+    .pdfedit-toolbar button:hover, .pdfedit-toolbar select:hover { border-color:var(--pdfedit-accent, #6e7bff); }
     .pdfedit-toolbar input[type=number] {
-      width:56px; cursor:text; -moz-appearance:textfield; color:#ffffff; background:#1f232a;
+      width:56px; cursor:text; -moz-appearance:textfield; color:var(--pdfedit-text, #ffffff); background:var(--pdfedit-input-bg, #1f232a);
     }
     .pdfedit-toolbar input[type=color] {
-      width:30px; height:28px; padding:2px; background:#3a3f47; border:1px solid #4a4f57;
+      width:30px; height:28px; padding:2px; background:var(--pdfedit-btn, #3a3f47); border:1px solid var(--pdfedit-btn-border, #4a4f57);
       border-radius:5px; cursor:pointer;
     }
-    .pdfedit-toolbar .sep { width:1px; align-self:stretch; background:#4a4f57; margin:0 2px; }
+    .pdfedit-toolbar .sep { width:1px; align-self:stretch; background:var(--pdfedit-btn-border, #4a4f57); margin:0 2px; }
     .pdfedit-toolbar .pdfedit-zoom { display:inline-flex; align-items:center; gap:6px; }
-    .pdfedit-toolbar input[type=range] { width:110px; cursor:pointer; accent-color:#6e7bff; }
+    .pdfedit-toolbar input[type=range] { width:110px; cursor:pointer; accent-color:var(--pdfedit-accent, #6e7bff); }
     .pdfedit-root {
       flex:1; min-height:0; overflow:auto; box-sizing:border-box;
       /* "safe center" keeps pages centred when they fit but falls back to start when a
          zoomed page is wider than the viewport, so its left edge stays scrollable. */
-      display:flex; flex-direction:column; align-items:safe center; gap:16px; padding:16px; background:#525659;
+      display:flex; flex-direction:column; align-items:safe center; gap:16px; padding:16px; background:var(--pdfedit-desk, #525659);
     }
     .pdfedit-page { position:relative; background:#fff; box-shadow:0 2px 10px rgba(0,0,0,.45); }
     .pdfedit-page canvas { display:block; }
@@ -369,7 +373,7 @@ function injectStyles(): void {
       font:700 12px/14px system-ui, sans-serif; text-align:center;
     }
     .pdfedit-root.pdfedit-whiteout-mode .pdfedit-page { cursor:crosshair; }
-    .pdfedit-toolbar button.pdfedit-on { border-color:#6e7bff; background:#4a5170; }
+    .pdfedit-toolbar button.pdfedit-on { border-color:var(--pdfedit-accent, #6e7bff); background:var(--pdfedit-on, #4a5170); color:var(--pdfedit-on-text, inherit); }
     .pdfedit-toolbar button:focus-visible, .pdfedit-toolbar select:focus-visible,
     .pdfedit-toolbar input:focus-visible, .pdfedit-img-del:focus-visible, .pdfedit-white-del:focus-visible {
       outline:2px solid #fff; outline-offset:1px;
