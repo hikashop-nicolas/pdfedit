@@ -282,15 +282,20 @@ describe("pdfedit toolbar", () => {
     openFixture();
     cy.get('input[type=file][accept*="image"]').selectFile("cypress/fixtures/img.png", { force: true });
     cy.get(".pdfedit-img").should("exist");
+    // The image lands in the middle of what is on screen, so its start is read, not assumed.
+    let left0 = 0;
+    cy.get(".pdfedit-img").then(($b) => {
+      left0 = parseFloat($b[0].style.left);
+    });
     // A run of arrow presses coalesces into one step.
     cy.get(".pdfedit-img").focus().trigger("keydown", { key: "ArrowRight" }).trigger("keydown", { key: "ArrowRight" });
-    cy.get(".pdfedit-img").should(($b) => expect(parseFloat($b[0].style.left)).to.eq(50));
+    cy.get(".pdfedit-img").should(($b) => expect(parseFloat($b[0].style.left)).to.eq(left0 + 10));
     cy.get('.pdfedit-toolbar [aria-label="Undo (Ctrl+Z)"]').click();
-    cy.get(".pdfedit-img").should(($b) => expect(parseFloat($b[0].style.left)).to.eq(40));
+    cy.get(".pdfedit-img").should(($b) => expect(parseFloat($b[0].style.left)).to.eq(left0));
     cy.get('.pdfedit-toolbar [aria-label="Undo (Ctrl+Z)"]').click();
     cy.get(".pdfedit-img").should("not.exist");
     cy.get('.pdfedit-toolbar [aria-label="Redo (Ctrl+Y)"]').click();
-    cy.get(".pdfedit-img").should("exist").and(($b) => expect(parseFloat($b[0].style.left)).to.eq(40));
+    cy.get(".pdfedit-img").should("exist").and(($b) => expect(parseFloat($b[0].style.left)).to.eq(left0));
   });
 
   it("undoes a text box added in blank space back to nothing", () => {

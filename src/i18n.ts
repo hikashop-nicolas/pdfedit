@@ -49,7 +49,7 @@ const en: Dict = {
   whiteout: "Whiteout",
   whiteoutTitle: "Whiteout (drag on a page to cover content)",
   whiteoutBoxAria: "Whiteout box. Arrow keys move it, plus and minus resize, Delete removes.",
-  deleteWhiteout: "Delete whiteout",
+  deleteWhiteout: "Delete whiteout",  moveText: "Move text box",
 };
 
 const fr: Dict = {
@@ -95,7 +95,7 @@ const fr: Dict = {
   whiteout: "Cache-blanc",
   whiteoutTitle: "Cache-blanc (glisser sur une page pour masquer le contenu)",
   whiteoutBoxAria: "Cache-blanc. Les flèches le déplacent, plus et moins le redimensionnent, Suppr le retire.",
-  deleteWhiteout: "Supprimer le cache-blanc",
+  deleteWhiteout: "Supprimer le cache-blanc",  moveText: "Déplacer la zone de texte",
 };
 
 const ja: Dict = {
@@ -141,7 +141,7 @@ const ja: Dict = {
   whiteout: "白塗り",
   whiteoutTitle: "白塗り（ページ上でドラッグして内容を隠します）",
   whiteoutBoxAria: "白塗りボックス。矢印キーで移動、プラスとマイナスでサイズ変更、Delete で削除します。",
-  deleteWhiteout: "白塗りを削除",
+  deleteWhiteout: "白塗りを削除",  moveText: "テキストボックスを移動",
 };
 
 const es: Dict = {
@@ -187,7 +187,7 @@ const es: Dict = {
   whiteout: "Tapar",
   whiteoutTitle: "Tapar (arrastre sobre una página para cubrir el contenido)",
   whiteoutBoxAria: "Recuadro para tapar. Las flechas lo mueven, más y menos lo redimensionan, Supr lo elimina.",
-  deleteWhiteout: "Eliminar el recuadro",
+  deleteWhiteout: "Eliminar el recuadro",  moveText: "Mover el cuadro de texto",
 };
 
 const de: Dict = {
@@ -233,7 +233,7 @@ const de: Dict = {
   whiteout: "Abdecken",
   whiteoutTitle: "Abdecken (auf einer Seite ziehen, um Inhalt zu verdecken)",
   whiteoutBoxAria: "Abdeckfeld. Pfeiltasten verschieben es, Plus und Minus ändern die Größe, Entf entfernt es.",
-  deleteWhiteout: "Abdeckung löschen",
+  deleteWhiteout: "Abdeckung löschen",  moveText: "Textfeld verschieben",
 };
 
 const pt: Dict = {
@@ -279,7 +279,7 @@ const pt: Dict = {
   whiteout: "Tapar",
   whiteoutTitle: "Tapar (arraste sobre uma página para cobrir o conteúdo)",
   whiteoutBoxAria: "Caixa de tapar. As setas movem-na, mais e menos redimensionam, Delete remove.",
-  deleteWhiteout: "Eliminar a caixa",
+  deleteWhiteout: "Eliminar a caixa",  moveText: "Mover a caixa de texto",
 };
 
 const ru: Dict = {
@@ -325,7 +325,7 @@ const ru: Dict = {
   whiteout: "Замазать",
   whiteoutTitle: "Замазать (протяните по странице, чтобы закрыть содержимое)",
   whiteoutBoxAria: "Прямоугольник-замазка. Стрелки перемещают, плюс и минус меняют размер, Delete удаляет.",
-  deleteWhiteout: "Удалить замазку",
+  deleteWhiteout: "Удалить замазку",  moveText: "Переместить текстовое поле",
 };
 
 const zh: Dict = {
@@ -371,7 +371,7 @@ const zh: Dict = {
   whiteout: "遮盖",
   whiteoutTitle: "遮盖（在页面上拖动以覆盖内容）",
   whiteoutBoxAria: "遮盖框。方向键移动，加号和减号调整大小，Delete 删除。",
-  deleteWhiteout: "删除遮盖",
+  deleteWhiteout: "删除遮盖",  moveText: "移动文本框",
 };
 
 const LOCALES: Record<string, Dict> = { en, fr, ja, es, de, pt, ru, zh };

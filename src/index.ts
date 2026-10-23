@@ -239,6 +239,10 @@ interface Paragraph {
   glyphPreserve: boolean;
   /** Added by the user in blank space (no original content to cover / preserve). */
   isNew?: boolean;
+  /** The handle an added box is moved by, a sibling of it on the page. */
+  grip?: HTMLElement;
+  /** Put an added box at a viewport position, keeping its PDF geometry and its handle in step. */
+  moveTo?: (vx: number, vy: number) => void;
   /** Stable identity for undo snapshots and for naming this object to a peer
    *  (assigned in wirePara). */
   uid?: string;
@@ -347,6 +351,14 @@ function injectStyles(): void {
     .pdfedit-para:focus, .pdfedit-para.pdfedit-active { box-shadow:0 0 0 2px #6e7bff; }
     /* Selection stays visible even when focus moves to a toolbar control. */
     ::highlight(pdfedit-sel) { background-color:rgba(110,123,255,.4); }
+    /* The handle an added text box is moved by. Dim until the box or the handle is under the
+       pointer or focused, so a page of boxes is not a page of icons. */
+    .pdfedit-grip { position:absolute; z-index:3; width:22px; height:22px; box-sizing:border-box; display:flex;
+      align-items:center; justify-content:center; cursor:move; touch-action:none; color:#fff;
+      background:#6e7bff; border-radius:5px 5px 0 0; opacity:.55; }
+    .pdfedit-grip:hover, .pdfedit-grip:focus-visible, .pdfedit-para:focus ~ .pdfedit-grip { opacity:1; }
+    .pdfedit-grip:focus-visible { outline:2px solid #fff; outline-offset:-4px; }
+    .pdfedit-grip svg { display:block; pointer-events:none; }
     .pdfedit-img { position:absolute; cursor:move; outline:1px dashed rgba(110,123,255,.9); }
     .pdfedit-img img { display:block; width:100%; height:auto; pointer-events:none; }
     .pdfedit-img-handle {
@@ -967,6 +979,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       // and the restore is the sole owner of box add/remove decisions at that point.
       if (!restoring && para.isNew && (el.textContent ?? "").trim() === "") {
         el.remove();
+        para.grip?.remove();
         const i = paragraphs.indexOf(para);
         if (i >= 0) paragraphs.splice(i, 1);
         if (activePara === para) activePara = null;
@@ -1179,8 +1192,74 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     wirePara(para);
     pageEl.appendChild(el);
     paragraphs.push(para);
+    attachGrip(para, pageEl);
     if (o.focus) el.focus();
     return para;
+  };
+
+  // A box added in blank space can be moved: by dragging its handle, or by the arrow keys with
+  // the handle focused. The handle sits above the box's top-left corner, outside the text, so
+  // it is never part of what is read back from the box.
+  const attachGrip = (p: Paragraph, pageEl: HTMLElement): void => {
+    const grip = document.createElement("div");
+    grip.className = "pdfedit-grip";
+    grip.tabIndex = 0;
+    grip.setAttribute("role", "button");
+    grip.setAttribute("aria-label", t("moveText"));
+    grip.title = t("moveText");
+    grip.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false" fill="currentColor"><path d="M12 2l4 4h-3v4h-2V6H8l4-4zm0 20l-4-4h3v-4h2v4h3l-4 4zM2 12l4-4v3h4v2H6v3l-4-4zm20 0l-4 4v-3h-4v-2h4V8l4 4z"/></svg>';
+    p.grip = grip;
+    const place = (): void => {
+      grip.style.left = p.el.style.left;
+      grip.style.top = `${Math.max(0, (parseFloat(p.el.style.top) || 0) - 22)}px`;
+    };
+    p.moveTo = (vx: number, vy: number): void => {
+      const maxX = Math.max(0, p.viewport.width - 24);
+      const maxY = Math.max(0, p.viewport.height - 24);
+      const left = Math.min(Math.max(0, vx), maxX);
+      const top = Math.min(Math.max(22, vy), maxY); // the handle needs its 22px above the box
+      p.el.style.left = `${left}px`;
+      p.el.style.top = `${top}px`;
+      const [pdfX, pdfY] = p.viewport.convertToPdfPoint(left, top);
+      const dy = pdfY - p.topY;
+      p.x = pdfX;
+      p.topY = pdfY;
+      p.bottomY += dy;
+      p.firstBaseline += dy;
+      place();
+    };
+    place();
+    pageEl.appendChild(grip);
+    grip.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const left0 = parseFloat(p.el.style.left) || 0;
+      const top0 = parseFloat(p.el.style.top) || 0;
+      // Screen px over the CSS zoom, or the box drifts from the pointer when zoomed.
+      const move = (ev: PointerEvent): void => p.moveTo?.(left0 + (ev.clientX - startX) / displayZoom, top0 + (ev.clientY - startY) / displayZoom);
+      const up = (): void => {
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", up);
+        document.removeEventListener("pointercancel", up);
+        change();
+        history.commit("mv:" + p.uid);
+      };
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", up);
+      document.addEventListener("pointercancel", up);
+    });
+    grip.addEventListener("keydown", (e) => {
+      const step = e.shiftKey ? 20 : 5;
+      const d: Record<string, [number, number]> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+      const by = d[e.key];
+      if (!by) return;
+      e.preventDefault();
+      p.moveTo?.((parseFloat(p.el.style.left) || 0) + by[0], (parseFloat(p.el.style.top) || 0) + by[1]);
+      change();
+      history.commit("mv:" + p.uid); // a run of arrow presses undoes as one step
+    });
   };
 
   const addTextAt = (pageEl: HTMLElement, viewport: pdfjsLib.PageViewport, pageIndex: number, clientX: number, clientY: number): void => {
@@ -1487,29 +1566,77 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
     history.commit(null);
   }
 
-  // The page under the middle of the scroll viewport, so inserts land on what
-  // the user is looking at rather than always on page 1.
+  // The part of the screen the document is scrolled in: the nearest scrolling ancestor, cut to
+  // the window. `root` itself is often as tall as the whole document, so its own middle says
+  // nothing about what is in front of the person.
+  function visibleRect(): { left: number; top: number; right: number; bottom: number } {
+    let box: { left: number; top: number; right: number; bottom: number } = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+    for (let el: HTMLElement | null = root; el; el = el.parentElement) {
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight + 1) {
+        const r = el.getBoundingClientRect();
+        box = { left: Math.max(box.left, r.left), top: Math.max(box.top, r.top), right: Math.min(box.right, r.right), bottom: Math.min(box.bottom, r.bottom) };
+        break;
+      }
+    }
+    return box;
+  }
+
+  // The page the person is looking at: the one showing the most of the visible area, so
+  // inserts land on what they see rather than always on page 1.
   function pageInView(): { el: HTMLElement; viewport: pdfjsLib.PageViewport; index: number } | undefined {
-    const rootRect = root.getBoundingClientRect();
-    const centerY = rootRect.top + rootRect.height / 2;
+    const v = visibleRect();
     let best: (typeof pageEls)[number] | undefined;
-    let bestDist = Infinity;
+    let bestShown = -1;
     for (const p of pageEls) {
       const r = p.el.getBoundingClientRect();
-      if (r.top <= centerY && r.bottom >= centerY) return p;
-      const d = Math.min(Math.abs(r.top - centerY), Math.abs(r.bottom - centerY));
-      if (d < bestDist) {
-        bestDist = d;
+      const shown = Math.min(r.bottom, v.bottom) - Math.max(r.top, v.top);
+      if (shown > bestShown) {
+        bestShown = shown;
         best = p;
       }
     }
     return best;
   }
 
+  // The middle of the visible part of a page, in that page's own px (the CSS zoom undone).
+  function visibleCentre(pd: { el: HTMLElement }): { x: number; y: number } {
+    const v = visibleRect();
+    const r = pd.el.getBoundingClientRect();
+    const cx = (Math.max(r.left, v.left) + Math.min(r.right, v.right)) / 2;
+    const cy = (Math.max(r.top, v.top) + Math.min(r.bottom, v.bottom)) / 2;
+    return { x: (cx - r.left) / displayZoom, y: (cy - r.top) / displayZoom };
+  }
+
   async function insertImage(file: File): Promise<void> {
     const target = pageInView() ?? pageEls[0];
     if (!target) return;
-    addImageBox(new Uint8Array(await file.arrayBuffer()), file.type, target, null, true);
+    const bytesImg = new Uint8Array(await file.arrayBuffer());
+    // Centred on what is in view, which needs the picture's proportions: how tall it will be
+    // decides where its top edge goes.
+    const widthPx = Math.min(160, target.viewport.width * 0.4);
+    const ratio = await imageRatio(bytesImg, file.type);
+    const c = visibleCentre(target);
+    const leftPx = Math.min(Math.max(0, c.x - widthPx / 2), Math.max(0, target.viewport.width - widthPx));
+    const topPx = Math.min(Math.max(0, c.y - (widthPx * ratio) / 2), Math.max(0, target.viewport.height - widthPx * ratio));
+    addImageBox(bytesImg, file.type, target, { leftPx, topPx, widthPx }, true);
+  }
+
+  // Height over width of an image, 1 when it cannot be read.
+  function imageRatio(bytesImg: Uint8Array, mime: string): Promise<number> {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(new Blob([bytesImg as BlobPart], { type: mime }));
+      const probe = new Image();
+      probe.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(probe.naturalWidth > 0 ? probe.naturalHeight / probe.naturalWidth : 1);
+      };
+      probe.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(1);
+      };
+      probe.src = url;
+    });
   }
 
   // Build an image box (DOM + drag/resize/delete wiring). `place` restores a saved
@@ -1610,9 +1737,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const startY = e.clientY;
       const left = parseFloat(box.style.left);
       const top = parseFloat(box.style.top);
+      // The pointer moves in screen px and the page is scaled by the CSS zoom, so a box that
+      // follows it exactly moves by the pointer's travel divided by that zoom.
       const move = (ev: PointerEvent) => {
-        box.style.left = `${left + ev.clientX - startX}px`;
-        box.style.top = `${top + ev.clientY - startY}px`;
+        box.style.left = `${left + (ev.clientX - startX) / displayZoom}px`;
+        box.style.top = `${top + (ev.clientY - startY) / displayZoom}px`;
       };
       const up = () => {
         document.removeEventListener("pointermove", move);
@@ -1635,7 +1764,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const startX = e.clientX;
       const startW = box.offsetWidth;
       const move = (ev: PointerEvent) => {
-        box.style.width = `${Math.max(20, startW + (ev.clientX - startX))}px`; // height is auto, keeps aspect
+        box.style.width = `${Math.max(20, startW + (ev.clientX - startX) / displayZoom)}px`; // height is auto, keeps aspect
       };
       const up = () => {
         document.removeEventListener("pointermove", move);
@@ -1896,7 +2025,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const thisPageEl = pageEl;
       pageEl.addEventListener("dblclick", (e) => {
         const t2 = e.target as HTMLElement;
-        if (t2.closest(".pdfedit-para") || t2.closest(".pdfedit-img") || t2.closest(".pdfedit-white")) return;
+        if (t2.closest(".pdfedit-para") || t2.closest(".pdfedit-img") || t2.closest(".pdfedit-white") || t2.closest(".pdfedit-grip")) return;
         addTextAt(thisPageEl, pageViewport, pageIndex, e.clientX, e.clientY);
       });
       // In whiteout mode, dragging on the page rubber-bands a new cover box.
@@ -2109,7 +2238,17 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       // Deskew the rotated page's items into upright space (baselines now horizontal) so the
       // grouping/box maths below are unchanged; export maps each drawn point back via `rotate`.
       if (paraRotate) for (const it of visible) [it.x, it.y] = rotatePoint(it.x, it.y, -paraRotate);
-      for (const lines of buildParagraphs(visible, bgOf)) {
+      const blocks = buildParagraphs(visible, bgOf);
+      // Where each block sits, so a block that is not flowing text can be told how far it may
+      // grow to the right before it would run under its neighbour or off the page.
+      const blockGeo = blocks.map((ls) => ({
+        left: Math.min(...ls.map((l) => l.minX)),
+        right: Math.max(...ls.map((l) => l.maxX)),
+        top: ls[0]!.y + ls[0]!.size * 0.85,
+        bottom: ls[ls.length - 1]!.y - ls[ls.length - 1]!.size * 0.3,
+      }));
+      const pageMarginX = Math.max(24, Math.min(...blockGeo.map((g) => g.left)));
+      for (const [bi, lines] of blocks.entries()) {
         const first = lines[0]!;
         if (lines.every((l) => l.text.trim() === "")) continue;
         const boxX = Math.min(...lines.map((l) => l.minX));
@@ -2241,6 +2380,18 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         }
         const baseRec = getFontRec(page, baseFontName);
 
+        // A left-aligned block whose lines break on purpose (a label, an address, a signature
+        // line) is as wide as its longest line, so typing at the end of that line made it wrap at
+        // once. Let it grow instead, up to the next block on its rows or the page margin. It stays
+        // as small as its text until then, so the room it may grow into is not clickable.
+        let growRight = boxRight;
+        if (!flowing && align === "left") {
+          let limit = pageW - pageMarginX;
+          for (const [bj, g] of blockGeo.entries()) {
+            if (bj !== bi && g.left >= boxRight - 1 && g.bottom < topY && g.top > bottomY) limit = Math.min(limit, g.left - size);
+          }
+          growRight = Math.max(boxRight, limit);
+        }
         const el = document.createElement("div");
         el.className = "pdfedit-para";
         el.contentEditable = passwordProtected ? "false" : "true";
@@ -2251,6 +2402,11 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         el.style.left = `${left}px`;
         el.style.top = `${top}px`;
         el.style.width = `${Math.max(dW, size * scale)}px`;
+        if (growRight > boxRight) {
+          el.style.width = "max-content";
+          el.style.minWidth = `${Math.max(dW, size * scale)}px`;
+          el.style.maxWidth = `${Math.max(dW, size * scale) + (growRight - boxRight) * scale}px`;
+        }
         el.style.minHeight = `${Math.max(dH, size * scale)}px`;
         el.style.fontSize = `${size * scale}px`;
         el.style.lineHeight = `${lineHeight * scale}px`;
@@ -2267,7 +2423,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const para: Paragraph = {
           page: p - 1,
           x: boxX,
-          w: boxRight - boxX,
+          w: growRight - boxX,
           topY,
           bottomY,
           firstBaseline: first.y,
@@ -2474,6 +2630,7 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
       const b = wantBoxes.get(p.uid ?? "");
       if (!b) {
         p.el.remove();
+        p.grip?.remove();
         const i = paragraphs.indexOf(p);
         if (i >= 0) paragraphs.splice(i, 1);
         if (activePara === p) activePara = null;
@@ -2489,6 +2646,10 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         if (p.align !== b.align) {
           p.align = b.align;
           p.el.style.textAlign = b.align;
+        }
+        if (p.x !== b.xPdf || p.topY !== b.yPdf) {
+          const [vx, vy] = p.viewport.convertToViewportPoint(b.xPdf, b.yPdf);
+          p.moveTo?.(vx, vy);
         }
         p.dirty = b.html !== "";
         p.el.classList.toggle("pdfedit-edited", p.dirty);
@@ -2793,7 +2954,23 @@ export function createPdfEditor(container: HTMLElement, bytes: Uint8Array, optio
         const emb = embKey ? await getEmbedded(embKey) : null;
         const embPua = !!(embKey && puaFonts.has(embKey));
         // A symbol font has glyphs at U+F0xx, not at ASCII; re-encode the text to reuse it.
-        if (space) return { font: emb && !embPua ? emb : await stdOf(), text: " ", faux: false, fauxItalic: false };
+        // A subset font from a word processor often has no real space glyph (the gaps are
+        // positioned, not drawn), and what it answers for one is its missing-glyph box: words came
+        // out three spaces apart. A space is never wider than the letter n in a font that means
+        // it (equal in a monospace one), so a wider answer means this font has none.
+        if (space) {
+          let usable = !!emb && !embPua && covers(emb, " ");
+          if (usable && emb) {
+            try {
+              const sw = emb.widthOfTextAtSize(" ", 100);
+              const nw = covers(emb, "n") ? emb.widthOfTextAtSize("n", 100) : 50;
+              usable = sw <= nw * 1.15;
+            } catch {
+              usable = false;
+            }
+          }
+          return { font: usable && emb ? emb : await stdOf(), text: " ", faux: false, fauxItalic: false };
+        }
         if (emb) {
           const reencoded = embPua ? toPua(part) : part;
           if (covers(emb, reencoded)) {
