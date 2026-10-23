@@ -119,6 +119,43 @@ describe("buildParagraphs", () => {
     ]);
     expect(paras).toHaveLength(2);
   });
+  // A contract page: short paragraphs with a blank line between, one real run of body text.
+  // Paragraph breaks outnumber line-to-line gaps, so the median gap is about two lines; the
+  // whole page then joined into one block whose box covered every click below its first line.
+  it("keeps blank-line separated paragraphs apart when breaks outnumber line gaps", () => {
+    const pitch = 13.6;
+    const paras = buildParagraphs([
+      line("Article 4 heading", 0, 623, 11),
+      line("Short body of article 4.", 0, 596, 11),
+      line("Article 5 heading", 0, 555, 11),
+      line("Short body of article 5.", 0, 527, 11),
+      line("Article 6 heading", 0, 492, 11),
+      line("Body of six, line one", 0, 465, 11),
+      line("Body of six, line two", 0, 465 - pitch, 11),
+      line("Body of six, line three", 0, 465 - 2 * pitch, 11),
+      line("Article 7 heading", 0, 388, 11),
+      line("Body of seven, line one", 0, 361, 11),
+      line("Body of seven, line two", 0, 361 - pitch, 11),
+    ]);
+    const sizes = paras.map((p) => p.length);
+    expect(Math.max(...sizes), "no block swallows a heading and the paragraphs after it").toBeLessThanOrEqual(3);
+    const six = paras.find((p) => p.some((l) => l.text.startsWith("Body of six")))!;
+    expect(six.map((l) => l.text)).toEqual(["Body of six, line one", "Body of six, line two", "Body of six, line three"]);
+  });
+
+  it("does not join a signature block's lines across its blank line", () => {
+    const paras = buildParagraphs([
+      line("Fait en double exemplaire, a Vaulx en Velin", 0, 304, 11),
+      line("Pour l'entreprise", 0, 269, 11),
+      line("Nom qualite du signataire", 0, 247, 11),
+      line("Body line one of the article above", 0, 361, 11),
+      line("Body line two of the article above", 0, 347.4, 11),
+      line("Body line three of the article above", 0, 333.8, 11),
+    ]);
+    const fait = paras.find((p) => p.some((l) => l.text.startsWith("Fait")))!;
+    expect(fait.some((l) => l.text.startsWith("Nom"))).toBe(false);
+  });
+
   it("splits blocks across a large vertical gap", () => {
     const paras = buildParagraphs([line("para one", 0, 200), line("para one cont", 0, 185), line("far below", 0, 40)]);
     expect(paras.length).toBeGreaterThan(1);

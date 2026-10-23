@@ -84,6 +84,12 @@ export const variance = (xs: number[]): number => {
   const m = xs.reduce((a, b) => a + b, 0) / xs.length;
   return xs.reduce((a, b) => a + (b - m) * (b - m), 0) / xs.length;
 };
+/** The q-th quantile (0 to 1) by the nearest rank, 0 for an empty list. */
+export const quantile = (xs: number[], q: number): number => {
+  if (xs.length === 0) return 0;
+  const s = xs.slice().sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.floor(q * s.length))]!;
+};
 export const median = (xs: number[]): number => {
   if (xs.length === 0) return 0;
   const s = xs.slice().sort((a, b) => a - b);
@@ -164,7 +170,11 @@ export function buildParagraphs(items: RunItem[], bgOf?: (ln: Line) => RGB | nul
     const g = ys[i - 1]! - ys[i]!;
     if (g > 1) gaps.push(g);
   }
-  const medGap = median(gaps);
+  // The line pitch is the gap between lines of one paragraph, not the typical gap on the page:
+  // paragraph breaks and headings add blank lines, and a page of short paragraphs has more of
+  // those gaps than line-to-line ones, so their median is about two lines and everything on the
+  // page joins into one block. The lower quartile sits on the real pitch.
+  const medGap = quantile(gaps, 0.25);
   const bgMap = bgOf ? new Map<Line, RGB | null>(segs.map((s) => [s, bgOf(s)])) : null;
 
   const blocks: Block[] = [];
